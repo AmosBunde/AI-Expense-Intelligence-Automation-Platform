@@ -85,22 +85,27 @@ class ApprovalAction(str, Enum):
 
 class ExtractedField(BaseModel):
     """A single field extracted from a document by the LLM."""
+    model_config = ConfigDict(from_attributes=True)
+
     field_name: str
     value: str
     confidence: float = Field(ge=0.0, le=1.0)
     bounding_box: Optional[list[float]] = None  # [x1, y1, x2, y2] normalized
 
 
-class ExpenseCreate(BaseModel):
-    """Input model for creating a new expense."""
-    document_type: DocumentType
-    file_key: Optional[str] = None  # S3 key for uploaded document
-    raw_text: Optional[str] = None  # For manual or pre-extracted text
-    metadata: dict = Field(default_factory=dict)
+class LineItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    description: str
+    quantity: float = 1.0
+    unit_price: Decimal
+    total: Decimal
 
 
 class ExpenseExtraction(BaseModel):
     """Result of LLM extraction from a document."""
+    model_config = ConfigDict(from_attributes=True)
+
     merchant_name: Optional[str] = None
     merchant_address: Optional[str] = None
     transaction_date: Optional[datetime] = None
@@ -115,24 +120,9 @@ class ExpenseExtraction(BaseModel):
     raw_fields: list[ExtractedField] = Field(default_factory=list)
 
 
-class LineItem(BaseModel):
-    description: str
-    quantity: float = 1.0
-    unit_price: Decimal
-    total: Decimal
-
-
-class PolicyCheckResult(BaseModel):
-    """Result of checking an expense against company policies."""
-    expense_id: uuid.UUID
-    is_compliant: bool
-    violations: list[PolicyViolation] = Field(default_factory=list)
-    recommended_action: ApprovalAction
-    auto_approved: bool = False
-    notes: str = ""
-
-
 class PolicyViolation(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     violation_type: PolicyViolationType
     severity: FraudRiskLevel
     description: str
@@ -141,14 +131,38 @@ class PolicyViolation(BaseModel):
     actual_value: Optional[str] = None
 
 
+class PolicyCheckResult(BaseModel):
+    """Result of checking an expense against company policies."""
+    model_config = ConfigDict(from_attributes=True)
+
+    expense_id: uuid.UUID
+    is_compliant: bool
+    violations: list[PolicyViolation] = Field(default_factory=list)
+    recommended_action: ApprovalAction
+    auto_approved: bool = False
+    notes: str = ""
+
+
 class FraudAnalysis(BaseModel):
     """AI-generated fraud analysis for an expense."""
+    model_config = ConfigDict(from_attributes=True)
+
     expense_id: uuid.UUID
     risk_level: FraudRiskLevel
     risk_score: float = Field(ge=0.0, le=1.0)
     indicators: list[str] = Field(default_factory=list)
     explanation: str = ""
     similar_expenses: list[uuid.UUID] = Field(default_factory=list)
+
+
+class ExpenseCreate(BaseModel):
+    """Input model for creating a new expense."""
+    model_config = ConfigDict(from_attributes=True)
+
+    document_type: DocumentType
+    file_key: Optional[str] = None  # S3 key for uploaded document
+    raw_text: Optional[str] = None  # For manual or pre-extracted text
+    metadata: dict = Field(default_factory=dict)
 
 
 class Expense(BaseModel):
@@ -182,6 +196,8 @@ class Expense(BaseModel):
 # =============================================================================
 
 class PaginatedResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     items: list = Field(default_factory=list)
     total: int = 0
     page: int = 1
@@ -191,6 +207,8 @@ class PaginatedResponse(BaseModel):
 
 class SpendSummary(BaseModel):
     """Aggregated spend data for dashboards."""
+    model_config = ConfigDict(from_attributes=True)
+
     period: str  # e.g., "2026-Q1"
     total_spend: Decimal
     by_category: dict[str, Decimal] = Field(default_factory=dict)
@@ -202,12 +220,10 @@ class SpendSummary(BaseModel):
 
 
 class HealthCheck(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     status: str = "ok"
     service: str
     version: str
     uptime_seconds: float
     dependencies: dict[str, str] = Field(default_factory=dict)
-
-
-# Fix forward reference
-ExpenseExtraction.model_rebuild()
