@@ -1,0 +1,33 @@
+FROM python:3.12-slim AS base
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY packages/shared-types/ packages/shared-types/
+COPY packages/db-client/ packages/db-client/
+
+RUN pip install --no-cache-dir \
+    fastapi[standard]==0.115.* \
+    uvicorn[standard]==0.34.* \
+    langchain-core==0.3.* \
+    langchain-openai==0.3.* \
+    langgraph==0.3.* \
+    openai==1.* \
+    pgvector==0.3.* \
+    sqlalchemy[asyncio]==2.0.* \
+    asyncpg==0.30.* \
+    pydantic==2.*
+
+COPY services/ai-engine/ services/ai-engine/
+
+ENV PYTHONPATH=/app:/app/packages/shared-types/src:/app/packages/db-client/src:/app/services/ai-engine
+
+EXPOSE 8001
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD curl -f http://localhost:8001/health || exit 1
+
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "2"]
