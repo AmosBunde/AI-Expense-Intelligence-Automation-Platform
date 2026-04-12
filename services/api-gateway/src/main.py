@@ -8,7 +8,7 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 import httpx
@@ -102,8 +102,8 @@ def create_token(user_id: str, org_id: str, role: str) -> str:
         "sub": user_id,
         "org": org_id,
         "role": role,
-        "exp": datetime.utcnow() + timedelta(minutes=settings.jwt_expiration_minutes),
-        "iat": datetime.utcnow(),
+        "exp": datetime.now(UTC) + timedelta(minutes=settings.jwt_expiration_minutes),
+        "iat": datetime.now(UTC),
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
@@ -274,24 +274,32 @@ async def approve_expense(expense_id: str, user: TokenPayload = Depends(rate_lim
 # Routes: AI Analysis
 # =============================================================================
 
+class AnalyzeRequest(BaseModel):
+    expense_id: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    expense_id: str | None = None
+
+
 @app.post("/api/v1/ai/analyze", tags=["ai"])
 async def analyze_expense(
-    expense_id: str,
+    body: AnalyzeRequest,
     user: TokenPayload = Depends(rate_limit),
 ):
     """Trigger AI analysis (fraud detection, categorization) for an expense."""
     client: httpx.AsyncClient = app.state.http_client
     response = await client.post(
         f"{settings.ai_engine_url}/analyze",
-        json={"expense_id": expense_id, "organization_id": user.org},
+        json={"expense_id": body.expense_id, "organization_id": user.org},
     )
     return response.json()
 
 
 @app.post("/api/v1/ai/chat", tags=["ai"])
 async def chat_with_ai(
-    message: str,
-    expense_id: str | None = None,
+    body: ChatRequest,
     user: TokenPayload = Depends(rate_limit),
 ):
     """Chat with the AI agent about expenses, policies, or spend patterns."""
@@ -299,10 +307,10 @@ async def chat_with_ai(
     response = await client.post(
         f"{settings.ai_engine_url}/chat",
         json={
-            "message": message,
+            "message": body.message,
             "user_id": user.sub,
             "organization_id": user.org,
-            "expense_id": expense_id,
+            "expense_id": body.expense_id,
         },
     )
     return response.json()
@@ -314,7 +322,7 @@ async def chat_with_ai(
 
 @app.get("/api/v1/analytics/spend-summary", tags=["analytics"])
 async def get_spend_summary(
-    period: str = Query(default="month", regex="^(week|month|quarter|year)$"),
+    period: str = Query(default="month", pattern="^(week|month|quarter|year)$"),
     user: TokenPayload = Depends(rate_limit),
 ):
     """Get aggregated spend summary for dashboards."""

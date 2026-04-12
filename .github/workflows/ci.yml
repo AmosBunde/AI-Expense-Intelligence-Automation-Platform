@@ -1,0 +1,242 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+
+jobs:
+  # ── Job 1: Lint ──────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ruff check
+        run: ruff check services/ packages/
+
+      - name: Ruff format check
+        run: ruff format --check services/ packages/
+
+  # ── Job 2: Backend Tests ─────────────────────────────────────
+  test-backend:
+    name: Test Backend
+    needs: lint
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: expense_db_test
+          POSTGRES_USER: expense_user
+          POSTGRES_PASSWORD: expense_pass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U expense_user -d expense_db_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://expense_user:expense_pass@localhost:5432/expense_db_test
+      DATABASE_URL_SYNC: postgresql://expense_user:expense_pass@localhost:5432/expense_db_test
+      REDIS_URL: redis://localhost:6379/0
+      CELERY_BROKER_URL: redis://localhost:6379/1
+      CELERY_RESULT_BACKEND: redis://localhost:6379/2
+      JWT_SECRET: test-secret-key
+      OPENAI_API_KEY: sk-test-fake-key
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('packages/*/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pytest pytest-asyncio pytest-cov aiosqlite httpx
+          pip install -e packages/shared-types[dev]
+          pip install -e packages/db-client[dev]
+          pip install -e packages/queue-client[dev]
+
+      - name: Enable pgvector extension
+        run: |
+          PGPASSWORD=expense_pass psql -h localhost -U expense_user -d expense_db_test \
+            -c "CREATE EXTENSION IF NOT EXISTS vector;"
+
+      - name: Test shared-types
+        run: |
+          pytest packages/shared-types/tests/ -v \
+            --cov=packages/shared-types/src \
+            --cov-report=xml:coverage-shared-types.xml \
+            --cov-fail-under=70
+
+      - name: Test db-client
+        run: |
+          pytest packages/db-client/tests/ -v \
+            --cov=packages/db-client/src \
+            --cov-report=xml:coverage-db-client.xml \
+            --cov-fail-under=70
+
+      - name: Test queue-client
+        run: |
+          pytest packages/queue-client/tests/ -v \
+            --cov=packages/queue-client/src \
+            --cov-report=xml:coverage-queue-client.xml \
+            --cov-fail-under=70
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: coverage-*.xml
+
+  # ── Job 3: Frontend Tests ────────────────────────────────────
+  test-frontend:
+    name: Test Frontend
+    needs: lint
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: services/dashboard-ui
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "store=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.store }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('services/dashboard-ui/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm run type-check
+
+      - name: Run tests
+        run: pnpm test -- --run
+
+      - name: Build
+        run: pnpm build
+
+  # ── Job 4: Docker Build ─────────────────────────────────────
+  docker-build:
+    name: Docker Build (${{ matrix.service }})
+    needs: [test-backend, test-frontend]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - api-gateway
+          - expense-processor
+          - ai-engine
+          - policy-engine
+          - dashboard-ui
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.service }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infrastructure/docker/Dockerfile.${{ matrix.service }}
+          push: false
+          tags: expense-platform/${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Job 5: Deploy ───────────────────────────────────────────
+  deploy:
+    name: Deploy
+    needs: docker-build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy placeholder
+        run: |
+          echo "==========================================="
+          echo " Deployment pipeline - pending setup"
+          echo "==========================================="
+          echo ""
+          echo "Commit:      ${{ github.sha }}"
+          echo "Branch:      ${{ github.ref_name }}"
+          echo "Triggered by: ${{ github.actor }}"
+          echo ""
+          echo "TODO: Configure deployment target"
+          echo "  - Push images to ECR"
+          echo "  - Update ECS task definitions"
+          echo "  - Run database migrations"
+          echo "  - Smoke test endpoints"
