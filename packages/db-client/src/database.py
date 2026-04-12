@@ -10,7 +10,7 @@ from typing import AsyncGenerator
 
 from sqlalchemy import (
     Column, String, Text, Numeric, DateTime, Boolean, Integer, Float,
-    ForeignKey, Enum as SAEnum, JSON, Index, text
+    ForeignKey, Enum as SAEnum, JSON, Index, text, column
 )
 from sqlalchemy.dialects.postgresql import UUID, ARRAY, JSONB
 from sqlalchemy.ext.asyncio import (
@@ -59,7 +59,7 @@ class UserORM(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     organization = relationship("OrganizationORM", back_populates="users")
-    expenses = relationship("ExpenseORM", back_populates="user")
+    expenses = relationship("ExpenseORM", back_populates="user", foreign_keys="[ExpenseORM.user_id]")
 
 
 class ExpenseORM(Base):
@@ -158,7 +158,7 @@ class PolicyDocumentChunkORM(Base):
     chunk_text = Column(Text, nullable=False)
     chunk_index = Column(Integer, nullable=False)
     embedding = Column(Vector(1536))  # OpenAI text-embedding-3-small
-    metadata = Column(JSONB, default={})
+    chunk_metadata = Column("metadata", JSONB, default={})
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -167,14 +167,18 @@ class PolicyDocumentChunkORM(Base):
 # =============================================================================
 
 class DatabaseClient:
-    def __init__(self, database_url: str, pool_size: int = 20, max_overflow: int = 10):
-        self.engine = create_async_engine(
-            database_url,
-            pool_size=pool_size,
-            max_overflow=max_overflow,
-            pool_pre_ping=True,
-            echo=False,
-        )
+    def __init__(
+        self,
+        database_url: str,
+        pool_size: int | None = 20,
+        max_overflow: int | None = 10,
+    ):
+        engine_kwargs: dict = {"pool_pre_ping": True, "echo": False}
+        if pool_size is not None:
+            engine_kwargs["pool_size"] = pool_size
+        if max_overflow is not None:
+            engine_kwargs["max_overflow"] = max_overflow
+        self.engine = create_async_engine(database_url, **engine_kwargs)
         self.async_session = async_sessionmaker(
             self.engine, class_=AsyncSession, expire_on_commit=False
         )
