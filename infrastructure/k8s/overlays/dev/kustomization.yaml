@@ -35,6 +35,14 @@ patches:
       - op: replace
         path: /spec/replicas
         value: 1
+  # Demo login is only allowed in explicitly dev-like environments
+  - target:
+      kind: ConfigMap
+      name: app-config
+    patch: |
+      - op: replace
+        path: /data/ENVIRONMENT
+        value: development
   # No autoscaling in dev — a fixed single replica is enough
   - target:
       kind: HorizontalPodAutoscaler

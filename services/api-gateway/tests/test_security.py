@@ -87,6 +87,30 @@ class TestCredentialValidation:
         )
         assert response.status_code == 200
 
+    def test_unset_environment_fails_closed(self, client, monkeypatch):
+        # An empty/unknown ENVIRONMENT must be treated as production,
+        # not as permission for demo logins
+        monkeypatch.setattr(settings, "auth_users", "")
+        monkeypatch.setattr(settings, "environment", "")
+        response = client.post(
+            "/api/v1/auth/login",
+            json={"email": "any@corp.com", "password": "anything"},
+        )
+        assert response.status_code == 503
+
+    def test_login_rate_limited_per_ip(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "login_rate_limit_per_minute", 3)
+        responses = [
+            client.post(
+                "/api/v1/auth/login",
+                json={"email": "any@corp.com", "password": "x"},
+            ).status_code
+            for _ in range(5)
+        ]
+        assert responses[:3] == [200, 200, 200]
+        assert responses[3] == 429
+        assert responses[4] == 429
+
 
 class TestSecurityHeaders:
     def test_headers_present_on_api_responses(self, client):

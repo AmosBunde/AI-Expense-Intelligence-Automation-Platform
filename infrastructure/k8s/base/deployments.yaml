@@ -257,6 +257,10 @@ data:
   LOG_LEVEL: "INFO"
   LOG_FORMAT: "json"
   S3_REGION: "us-east-1"
+  # Fail closed: the gateway only allows demo login in explicit dev
+  # environments, so the base default is production. The dev overlay
+  # patches this to "development".
+  ENVIRONMENT: "production"
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
