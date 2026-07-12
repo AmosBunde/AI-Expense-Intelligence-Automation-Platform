@@ -1,0 +1,50 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Dev overlay: single replica per service, GHCR `latest` images, HPA removed
+# so the cluster footprint stays small. Apply with:
+#   kubectl apply -k infrastructure/k8s/overlays/dev/
+
+namespace: expense-platform
+
+resources:
+  - ../../base
+
+images:
+  - name: expense-api-gateway
+    newName: ghcr.io/amosbunde/expense-api-gateway
+    newTag: latest
+  - name: expense-ai-engine
+    newName: ghcr.io/amosbunde/expense-ai-engine
+    newTag: latest
+  - name: expense-expense-processor
+    newName: ghcr.io/amosbunde/expense-expense-processor
+    newTag: latest
+  - name: expense-policy-engine
+    newName: ghcr.io/amosbunde/expense-policy-engine
+    newTag: latest
+  - name: expense-dashboard-ui
+    newName: ghcr.io/amosbunde/expense-dashboard-ui
+    newTag: latest
+
+patches:
+  # One replica of everything in dev
+  - target:
+      kind: Deployment
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  # No autoscaling in dev — a fixed single replica is enough
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: api-gateway-hpa
+    patch: |
+      $patch: delete
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: api-gateway-hpa
+
+commonAnnotations:
+  environment: dev
