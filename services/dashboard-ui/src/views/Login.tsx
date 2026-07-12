@@ -53,7 +53,7 @@ export default function Login() {
         <h2 className="h2" style={{ marginBottom: 24 }}>
           Sign in
         </h2>
-        {error ? <div className="error-note">{error}</div> : null}
+        {error ? <div className="error-note" role="alert">{error}</div> : null}
         <form onSubmit={submit}>
           <div className="field">
             <label htmlFor="email">Work email</label>
@@ -79,7 +79,7 @@ export default function Login() {
               placeholder="••••••••"
             />
           </div>
-          <button className="btn primary" style={{ width: "100%" }} disabled={busy}>
+          <button className="btn primary" style={{ width: "100%" }} disabled={busy} aria-busy={busy}>
             {busy ? "Signing in…" : "Sign in"}
           </button>
         </form>

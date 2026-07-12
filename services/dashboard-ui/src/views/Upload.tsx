@@ -38,13 +38,15 @@ export default function Upload() {
         </div>
       </header>
 
-      {error ? <div className="error-note">{error}</div> : null}
-      {result ? (
-        <div className="panel" style={{ marginBottom: 16 }}>
-          <span className="badge good">submitted</span>
-          <p style={{ marginTop: 8, fontSize: 14 }}>{result}</p>
-        </div>
-      ) : null}
+      {error ? <div className="error-note" role="alert">{error}</div> : null}
+      <div aria-live="polite">
+        {result ? (
+          <div className="panel" style={{ marginBottom: 16 }}>
+            <span className="badge good">submitted</span>
+            <p style={{ marginTop: 8, fontSize: 14 }}>{result}</p>
+          </div>
+        ) : null}
+      </div>
 
       <div
         className={`dropzone ${over ? "over" : ""}`}

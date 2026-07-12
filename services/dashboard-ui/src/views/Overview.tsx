@@ -42,7 +42,7 @@ export default function Overview() {
         </div>
       </header>
 
-      {error ? <div className="error-note">{error}</div> : null}
+      {error ? <div className="error-note" role="alert">{error}</div> : null}
 
       {summary ? (
         <>
@@ -115,7 +115,21 @@ export default function Overview() {
           </section>
         </>
       ) : !error ? (
-        <div className="empty">Loading…</div>
+        <div aria-hidden>
+          <div className="grid cols-4">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className="stat">
+                <div className="skeleton" style={{ width: 90, height: 11 }} />
+                <div className="skeleton" style={{ width: 130, height: 34, marginTop: 8 }} />
+              </div>
+            ))}
+          </div>
+          <hr className="rule" />
+          <div className="grid cols-2">
+            <div className="panel skeleton" style={{ height: 220 }} />
+            <div className="panel skeleton" style={{ height: 220 }} />
+          </div>
+        </div>
       ) : null}
     </>
   );
