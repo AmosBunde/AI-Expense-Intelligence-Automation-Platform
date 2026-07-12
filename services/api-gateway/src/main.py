@@ -41,6 +41,7 @@ class Settings(BaseModel):
     policy_engine_url: str = os.getenv("POLICY_ENGINE_URL", "http://localhost:8003")
     cors_origins: list[str] = os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")
     rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
+    login_rate_limit_per_minute: int = int(os.getenv("LOGIN_RATE_LIMIT_PER_MINUTE", "10"))
     s3_bucket: str = os.getenv("S3_BUCKET", "expense-documents")
     s3_endpoint: str = os.getenv("S3_ENDPOINT", "http://localhost:9000")
     max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "10"))
@@ -206,22 +207,43 @@ async def rate_limit(user: TokenPayload = Depends(get_current_user)):
 # Routes: Auth
 # =============================================================================
 
+# Verifying against this when the user is unknown keeps response timing
+# identical to the wrong-password path (no account enumeration via timing).
+_DUMMY_HASH = bcrypt.hashpw(b"timing-equalizer", bcrypt.gensalt()).decode()
+
+# Demo mode requires an explicitly dev-like environment, not merely "not
+# production" — an unset ENVIRONMENT in a real deployment must not fail open.
+DEMO_ENVIRONMENTS = {"development", "dev", "local", "test"}
+
+
+async def _login_rate_limit(request: Request) -> None:
+    """Fixed-window per-IP limit for the pre-auth login endpoint."""
+    ip = request.client.host if request.client else "unknown"
+    key = f"rate:login:{ip}"
+    r = app.state.redis
+    count = await r.incr(key)
+    if count == 1:
+        await r.expire(key, 60)
+    if count > settings.login_rate_limit_per_minute:
+        raise HTTPException(status_code=429, detail="Too many login attempts")
+
+
 @app.post("/api/v1/auth/login", response_model=TokenResponse, tags=["auth"])
-async def login(request: LoginRequest):
+async def login(request: LoginRequest, http_request: Request):
     """Authenticate and receive a JWT token.
 
     Credential sources, in order:
     - AUTH_USERS configured: strict bcrypt validation, unknown users rejected.
-    - No AUTH_USERS in production: logins disabled (503) — never a silent bypass.
+    - No AUTH_USERS outside an explicit dev environment: logins disabled (503).
     - No AUTH_USERS in dev/test: demo mode, any credentials get an employee token.
     """
+    await _login_rate_limit(http_request)
     users = _load_auth_users()
     if users:
         record = users.get(request.email.lower())
-        password_ok = record is not None and bcrypt.checkpw(
-            request.password.encode(), record["password_hash"].encode()
-        )
-        if not password_ok:
+        stored_hash = record["password_hash"] if record else _DUMMY_HASH
+        password_ok = bcrypt.checkpw(request.password.encode(), stored_hash.encode())
+        if record is None or not password_ok:
             # Same error for unknown user and bad password: no account enumeration
             raise HTTPException(status_code=401, detail="Invalid credentials")
         token = create_token(
@@ -229,7 +251,9 @@ async def login(request: LoginRequest):
             org_id=record.get("org", "default-org"),
             role=record.get("role", "employee"),
         )
-    elif settings.is_production:
+    elif settings.environment.lower() not in DEMO_ENVIRONMENTS:
+        # Fail closed: unset or unrecognized ENVIRONMENT is treated as
+        # production, not as an invitation to demo mode
         raise HTTPException(
             status_code=503,
             detail="Login is not configured. Set AUTH_USERS on the gateway.",
