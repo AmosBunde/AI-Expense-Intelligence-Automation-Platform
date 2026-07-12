@@ -6,21 +6,62 @@
 ![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
 ![React 18](https://img.shields.io/badge/react-18-61dafb)
 
-> An AI-powered system that categorizes, analyzes, and automates business spend workflows. Ingests receipts, invoices, and transaction data. Extracts structured fields via LLM. Enriches with company policies via RAG. Agents flag anomalies, detect fraud, and suggest actions. Automates approvals and categorization. Dashboards show spend insights. Supports real-time inference and batch processing.
+> An AI-powered system that categorizes, analyzes, and automates business spend workflows. Receipts and invoices are read by an LLM pipeline, checked against company policy via RAG, scored for fraud, and routed for approval — before anyone opens a spreadsheet.
+
+**Quickstart:** `cp .env.example .env && make dev` → gateway on
+[localhost:8000/docs](http://localhost:8000/docs), dashboard on
+[localhost:5173](http://localhost:5173). All operational commands are in the
+[Makefile](Makefile) — run `make` to list them.
 
 ## Table of Contents
 
-- [Architecture Overview](#architecture-overview)
+- [How It Works](#how-it-works)
+- [Architecture](#architecture)
+- [The AI Engine](#the-ai-engine)
+- [The Dashboard](#the-dashboard)
+- [Security Model](#security-model)
+- [Scalability](#scalability)
 - [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
 - [Service Ports](#service-ports)
 - [Local Development Setup](#local-development-setup)
-- [Cloud Deployment](#cloud-deployment)
+- [Deployment](#deployment)
 - [Environment Variables](#environment-variables)
 - [Contributing](#contributing)
 - [Documentation](#documentation)
 
-## Architecture Overview
+## How It Works
+
+The life of one receipt, end to end:
+
+1. **Upload.** An employee drops a receipt (image or PDF) into the dashboard.
+   The API Gateway authenticates the JWT, enforces the per-user rate limit and
+   the 10 MB / content-type upload rules, stores the file reference under the
+   caller's organization, and forwards the payload to the Expense Processor.
+2. **Extraction.** The Expense Processor runs OCR (Tesseract, with pdf2image
+   for PDFs), then an LLM extraction pass turns raw text into structured
+   fields — merchant, date, total, tax, currency, line items — and normalizes
+   them (currency codes, date formats, merchant canonicalization).
+3. **AI analysis.** The AI Engine's LangGraph pipeline picks up the expense:
+   it categorizes it, retrieves the relevant company policy passages from
+   pgvector (RAG), scores fraud signals (duplicate detection, amount outliers
+   versus the org's history, vendor/time-pattern anomalies), and writes an
+   explanation of its reasoning onto the expense record.
+4. **Policy verdict.** The Policy Engine evaluates deterministic rules —
+   amount thresholds, per-head meal limits, duplicate windows, auto-approval
+   floors. Low-risk, under-limit expenses are **auto-approved** with no human
+   involved; everything else is routed to a manager's queue with the AI
+   reasoning and the exact rule that fired attached.
+5. **Review & notify.** Managers approve or reject from the dashboard (RBAC
+   enforced at the gateway); the Notification Service emails or Slacks the
+   outcome. Batch CSV/Excel imports follow the same pipeline via Celery
+   workers; nightly reconciliation runs in the batch processor.
+6. **Ask questions.** At any point, anyone can ask the AI Analyst chat things
+   like *"what did we spend on travel this quarter?"* or *"summarize our meal
+   policy"* — a LangGraph chat agent answers using spend-query tools and
+   RAG-grounded policy citations.
+
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -43,49 +84,167 @@
     └────────────────────────────────────────────────────────────┘
 ```
 
+Design principles:
+
+- **The gateway is the only public surface.** Every downstream service is
+  reachable only on the internal network; auth, rate limiting, RBAC checks,
+  and upload validation happen once, at the edge.
+- **Services are stateless.** All state lives in PostgreSQL, Redis, and
+  object storage, so any service can scale horizontally by adding replicas.
+- **Deterministic rules decide; AI explains and flags.** Auto-approval is
+  driven by the rule engine, not by LLM output — the AI contributes
+  categorization, anomaly scores, and human-readable reasoning, and its
+  scores feed *into* rules rather than replacing them.
+- **Async where latency doesn't matter.** Single receipts process
+  synchronously for fast feedback; batch imports and reconciliation go
+  through Celery queues.
+
+Deeper reading: [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) (C4 +
+sequence diagrams) and the [ADRs](docs/adr/) covering the microservices
+split, LangGraph, pgvector, and the rule engine.
+
+## The AI Engine
+
+Three cooperating pieces, all in `services/ai-engine/`:
+
+- **Analysis pipeline** (`src/agent/graph.py`) — a LangGraph state machine:
+  `extract → categorize → retrieve policy context → fraud scoring →
+  compose verdict`. Each node is independently testable; prompts live in
+  `src/prompts/` as versioned templates.
+- **RAG over pgvector** (`src/rag/`) — company policy documents are chunked,
+  embedded, and stored in PostgreSQL with the pgvector extension. Retrieval
+  grounds both the analysis pipeline (policy-aware fraud reasoning) and the
+  chat agent (answers cite their source passages). One database serves both
+  relational and vector workloads — no separate vector store to operate.
+- **Chat agent** (`src/agent/chat_graph.py` + `src/tools/`) — a
+  tool-routing agent with three tools: spend aggregation queries, fraud/
+  anomaly lookups, and policy similarity search. The agent decides which
+  tools a question needs, calls them, and synthesizes a grounded answer.
+
+## The Dashboard
+
+**Meridian** (`services/dashboard-ui/`) is a Vite + React 18 + TypeScript
+SPA — Swiss-typographic design, light/dark themes, mobile-first, zero
+runtime dependencies beyond React.
+
+| View | What you can do |
+|---|---|
+| Overview | Spend totals, auto-approval rate, monthly trend, category breakdown, live anomaly feed |
+| Expenses | Filterable ledger → detail drawer with AI analysis, fraud score, policy verdict; managers approve flagged items in place |
+| Upload | Drag-and-drop receipts with instant validation feedback |
+| AI Analyst | Chat about spend, expenses, and policy with cited sources |
+| Policies | Browse the rulebook; admins/finance create rules |
+
+Role-gated actions (approve, create policy) are hidden for roles that lack
+them — and enforced again server-side at the gateway, which is the
+authority. In local dev the UI runs in labeled **demo mode** when the
+backend is unreachable, so it's explorable standalone.
+
+## Security Model
+
+**Authentication & authorization**
+
+- JWT bearer tokens (HS256) carrying `sub` (user), `org` (tenant), and
+  `role` claims; every downstream query is scoped by the org claim.
+- Credentials verify against bcrypt hashes configured via `AUTH_USERS`.
+  Unknown-user and wrong-password failures are indistinguishable in both
+  response *and timing* (dummy-hash verification), preventing account
+  enumeration.
+- RBAC at the gateway: approvals require `manager`/`admin`/`finance`;
+  policy creation and batch imports require `admin`/`finance`.
+- **Fail-closed posture:** in production the gateway refuses to start with
+  a missing/default `JWT_SECRET`, and refuses logins entirely if
+  `AUTH_USERS` is unconfigured. Demo login exists only when `ENVIRONMENT`
+  is explicitly dev-like; an unset environment is treated as production.
+
+**Abuse resistance**
+
+- Per-user sliding-window rate limit (Redis) on all authenticated routes;
+  separate per-IP fixed-window limit on the pre-auth login endpoint.
+- Uploads capped (10 MB receipts / 50 MB batches) with content-type
+  allowlists — enforced by reading at most `limit+1` bytes, never buffering
+  unbounded input.
+- Security headers from both the app and nginx (`X-Content-Type-Options`,
+  `X-Frame-Options`, `Referrer-Policy`, `Cache-Control: no-store` on API
+  responses, HSTS in production); CORS restricted to explicit methods and
+  headers.
+
+**Secrets & deployment hardening**
+
+- No secrets in git: the prod compose file requires them from an env file
+  (`${VAR:?}` fails startup if missing); Kubernetes reads them from an
+  `app-secrets` Secret ([template](infrastructure/k8s/base/secrets.example.yaml)
+  deliberately excluded from kustomize resources).
+- Production containers publish only the gateway and dashboard ports;
+  Postgres/Redis/MinIO are internal-only. Known accepted trade-off on the
+  single-VM target: service-to-service traffic inside the Docker network is
+  plaintext — put TLS at the edge and upgrade to K8s + mTLS (service mesh)
+  if your threat model requires encrypted east-west traffic.
+
+**Verification:** the gateway ships 42 tests including a dedicated security
+suite (credential validation, fail-closed behavior, rate limits, header
+presence, upload rejection). CI runs lint → tests → build on every PR.
+
+## Scalability
+
+| Layer | How it scales | Notes |
+|---|---|---|
+| API Gateway & services | Horizontally — stateless replicas behind the ingress/LB | K8s prod overlay runs 3 gateway / 3 AI-engine replicas |
+| Peak absorption | HPA on the gateway (CPU 70% / mem 80%, 2→10 replicas) | `infrastructure/k8s/base/deployments.yaml` |
+| Async work | Celery workers on Redis queues; batch imports and notifications never block request paths | Scale workers independently (5 replicas in prod overlay) |
+| Database | PostgreSQL with connection pooling; pgvector indexes for ANN search | Add read replicas for analytics before sharding |
+| Cache & rate limiting | Redis (LRU-capped in prod compose) | Move to Redis Cluster/ElastiCache when a single node saturates |
+| LLM calls | The dominant latency + cost driver | Bounded by upload limits and rate limits; batch pipeline smooths spikes |
+
+Known bottlenecks, in the order you'd hit them: (1) OpenAI API throughput —
+mitigate with request batching and caching of repeated policy retrievals;
+(2) single Postgres writer — read replicas, then partition expenses by org;
+(3) synchronous receipt processing under burst load — shift extraction to
+the Celery path once p95 upload latency matters. Load-test scaffolding lives
+in `tests/load/locustfile.py` (`locust -f tests/load/locustfile.py`).
+
 ## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| API Gateway | Python 3.12, FastAPI, Pydantic v2 |
+| API Gateway | Python 3.12, FastAPI, Pydantic v2, PyJWT, bcrypt |
 | AI Engine | LangGraph, LangChain, OpenAI API, pgvector |
 | Expense Processor | Python, Tesseract OCR, pdf2image |
 | Policy Engine | Python, rule-engine, custom DSL |
-| Dashboard | React 18, TypeScript, Recharts, TanStack Query |
+| Dashboard | React 18, TypeScript, Vite, hand-rolled SVG charts |
 | Database | PostgreSQL 16 + pgvector |
-| Cache | Redis 7 |
-| Queue | Celery (Redis broker) |
+| Cache / queues | Redis 7, Celery |
 | Storage | AWS S3 / MinIO (local) |
-| Containerization | Docker, Docker Compose |
-| Orchestration | Kubernetes / AWS ECS |
+| Packaging | Docker multi-stage builds, GHCR images |
+| Orchestration | Kubernetes (Kustomize) / AWS ECS |
 | IaC | Terraform |
-| CI/CD | GitHub Actions |
+| CI/CD | GitHub Actions (CI on PRs, image publishing on main/tags) |
 
 ## Project Structure
 
 ```
 expense-intelligence-platform/
 ├── services/
-│   ├── api-gateway/          # Request routing, auth, rate limiting
-│   ├── expense-processor/    # Document ingestion, OCR, field extraction
-│   ├── ai-engine/            # LangGraph agents, RAG, LLM inference
-│   ├── policy-engine/        # Company policy rules, auto-approval
-│   ├── dashboard-ui/         # React frontend with analytics
-│   ├── notification-service/ # Email, Slack, webhook notifications
-│   └── batch-processor/      # Scheduled batch jobs, reconciliation
+│   ├── api-gateway/          # Public edge: auth, RBAC, rate limits, routing
+│   ├── expense-processor/    # OCR, LLM extraction, normalization
+│   ├── ai-engine/            # LangGraph pipeline, RAG, chat agent, fraud tools
+│   ├── policy-engine/        # Deterministic rules, auto-approval
+│   ├── dashboard-ui/         # Meridian — React analytics dashboard
+│   ├── notification-service/ # Email, Slack, webhook delivery
+│   └── batch-processor/      # CSV imports, scheduled reconciliation
 ├── packages/
-│   ├── shared-types/         # Pydantic models, TypeScript types
-│   ├── db-client/            # Database connection, migrations
-│   └── queue-client/         # Celery task definitions
+│   ├── shared-types/         # Pydantic domain models shared by services
+│   ├── db-client/            # SQLAlchemy ORM, Alembic migrations, pooling
+│   └── queue-client/         # Celery app + task definitions
 ├── infrastructure/
-│   ├── docker/               # Dockerfiles, compose files
-│   ├── k8s/                  # Kubernetes manifests (Kustomize)
-│   └── terraform/            # AWS infrastructure as code
-├── migrations/               # Alembic database migrations
-├── docs/                     # Architecture docs, ADRs, API specs
-├── scripts/                  # Dev tooling, seed data, utilities
-├── .github/                  # CI/CD workflows, issue templates
-└── .claude/skills/           # Claude Code implementation skill
+│   ├── docker/               # Dockerfiles, dev/infra/prod compose, nginx
+│   ├── k8s/                  # Kustomize base + dev/staging/prod overlays
+│   └── terraform/            # AWS VPC, RDS, ElastiCache, ECS modules
+├── docs/                     # Architecture, ADRs, deployment guide
+├── scripts/                  # Seed data, issue tooling
+├── tests/                    # Cross-service integration + Locust load tests
+├── Makefile                  # Single entrypoint: make help
+└── .github/workflows/        # ci.yml (PR gate) + release.yml (GHCR publish)
 ```
 
 ## Service Ports
@@ -103,7 +262,8 @@ expense-intelligence-platform/
 | Redis | 6379 | — | `redis:7-alpine` |
 | MinIO | 9000 (API) / 9001 (console) | — | `minio/minio` |
 
-Images are published to GHCR by the [Release Images workflow](.github/workflows/release.yml) on every push to `main` (tagged `latest` + commit SHA) and on `v*.*.*` tags (semver).
+Images are published to GHCR by the [Release Images workflow](.github/workflows/release.yml)
+on every push to `main` (tagged `latest` + commit SHA) and on `v*.*.*` tags (semver).
 
 ---
 
@@ -111,243 +271,116 @@ Images are published to GHCR by the [Release Images workflow](.github/workflows/
 
 ### Prerequisites
 
-- Python 3.12+
-- Node.js 20+ and pnpm
-- Docker and Docker Compose v2
-- Git
+- Python 3.12+ · Node.js 20+ and pnpm · Docker + Compose v2 · Git
 
-### Step 1: Clone and Configure
+### The short way
 
 ```bash
 git clone https://github.com/AmosBunde/AI-Expense-Intelligence-Automation-Platform.git
 cd AI-Expense-Intelligence-Automation-Platform
-
-# Copy environment template
-cp .env.example .env
-
-# Edit .env with your API keys
-# Required: OPENAI_API_KEY
-# Optional: AWS credentials (falls back to MinIO locally)
+cp .env.example .env        # set OPENAI_API_KEY; the rest has dev defaults
+make dev                    # builds and starts everything
 ```
 
-### Step 2: Start Infrastructure Services
+Gateway: <http://localhost:8000/docs> · Dashboard: <http://localhost:5173> ·
+MinIO console: <http://localhost:9001>. In dev, any email/password signs in
+(demo mode); the dashboard shows labeled sample data if a backend is down.
+
+### The granular way (services on the host)
 
 ```bash
-# Start PostgreSQL, Redis, MinIO, and pgvector
-docker compose -f infrastructure/docker/docker-compose.infra.yml up -d
+make infra                  # just Postgres + Redis + MinIO in Docker
+python -m venv .venv && source .venv/bin/activate
+pip install -e packages/shared-types -e packages/db-client -e packages/queue-client
+make migrate && make seed
 
-# Wait for services to be healthy
-docker compose -f infrastructure/docker/docker-compose.infra.yml ps
-```
-
-### Step 3: Initialize Database
-
-```bash
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # Linux/Mac
-# .venv\Scripts\activate   # Windows
-
-# Install shared packages
-pip install -e packages/db-client
-pip install -e packages/shared-types
-pip install -e packages/queue-client
-
-# Run migrations
-cd packages/db-client
-alembic upgrade head
-cd ../..
-
-# Seed sample data
-python scripts/seed_data.py
-```
-
-### Step 4: Start Backend Services
-
-```bash
-# Terminal 1: API Gateway
-cd services/api-gateway
-pip install -e ".[dev]"
-uvicorn src.main:app --reload --port 8000
-
-# Terminal 2: AI Engine
-cd services/ai-engine
-pip install -e ".[dev]"
-uvicorn src.main:app --reload --port 8001
-
-# Terminal 3: Expense Processor
-cd services/expense-processor
-pip install -e ".[dev]"
-uvicorn src.main:app --reload --port 8002
-
-# Terminal 4: Policy Engine
-cd services/policy-engine
-pip install -e ".[dev]"
-uvicorn src.main:app --reload --port 8003
-
-# Terminal 5: Celery Workers
+# each in its own terminal:
+cd services/api-gateway        && pip install -e ".[dev]" && uvicorn src.main:app --reload --port 8000
+cd services/ai-engine          && pip install -e ".[dev]" && uvicorn src.main:app --reload --port 8001
+cd services/expense-processor  && pip install -e ".[dev]" && uvicorn src.main:app --reload --port 8002
+cd services/policy-engine      && pip install -e ".[dev]" && uvicorn src.main:app --reload --port 8003
 celery -A packages.queue_client.app worker --loglevel=info
+
+cd services/dashboard-ui && pnpm install && pnpm dev
 ```
 
-### Step 5: Start Frontend
+### Tests & quality gates
 
 ```bash
-cd services/dashboard-ui
-pnpm install
-pnpm dev  # Starts on http://localhost:5173
-```
-
-### Step 6: One-Command Start (Alternative)
-
-```bash
-# Start everything with Docker Compose
-docker compose up --build
-
-# Services available at:
-# - API Gateway:  http://localhost:8000
-# - Dashboard:    http://localhost:5173
-# - MinIO:        http://localhost:9001
-# - pgAdmin:      http://localhost:5050
-```
-
-### Running Tests
-
-```bash
-# All backend tests
-pytest --cov=services --cov-report=html
-
-# Specific service
-pytest services/ai-engine/tests/ -v
-
-# Frontend tests
-cd services/dashboard-ui && pnpm test
-
-# Integration tests (requires running infrastructure)
-pytest tests/integration/ -v --run-integration
-
-# Load tests
+make test        # backend suites + dashboard type-check/tests/build
+make lint        # ruff check + format check
+make test-backend
+make test-frontend
+pytest tests/integration/ -v --run-integration   # needs `make infra`
 locust -f tests/load/locustfile.py --host=http://localhost:8000
 ```
 
 ---
 
-## Cloud Deployment
+## Deployment
 
-> **Start here:** the step-by-step [Deployment Guide](docs/deployment/DEPLOYMENT.md) covers the release/image flow, required secrets, database migrations, smoke tests, rollback, and a production readiness checklist. The sections below are quick references per target.
+> **Start here:** the step-by-step [Deployment Guide](docs/deployment/DEPLOYMENT.md)
+> covers the release/image flow, required secrets, database migrations, smoke
+> tests, rollback, and a production readiness checklist.
 
-### Option A: Docker + AWS ECS (Recommended for Production)
-
-```bash
-# 1. Build and push images
-export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-export AWS_REGION=us-east-1
-export ECR_REGISTRY=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
-
-aws ecr get-login-password --region $AWS_REGION | \
-  docker login --username AWS --password-stdin $ECR_REGISTRY
-
-# Build all services
-for service in api-gateway expense-processor ai-engine policy-engine dashboard-ui; do
-  docker build -t $ECR_REGISTRY/expense-$service:latest \
-    -f infrastructure/docker/Dockerfile.$service .
-  docker push $ECR_REGISTRY/expense-$service:latest
-done
-
-# 2. Provision infrastructure with Terraform
-cd infrastructure/terraform/environments/prod
-terraform init
-terraform plan -out=tfplan
-terraform apply tfplan
-
-# 3. Deploy services
-# ECS services are configured via Terraform and auto-deploy from ECR
-```
-
-### Option B: Docker + GCP Cloud Run
+### Option A: single VM with Docker Compose
 
 ```bash
-# 1. Authenticate
-gcloud auth configure-docker
-
-# 2. Build and push
-export PROJECT_ID=$(gcloud config get-value project)
-for service in api-gateway expense-processor ai-engine policy-engine dashboard-ui; do
-  docker build -t gcr.io/$PROJECT_ID/expense-$service:latest \
-    -f infrastructure/docker/Dockerfile.$service .
-  docker push gcr.io/$PROJECT_ID/expense-$service:latest
-done
-
-# 3. Deploy each service
-for service in api-gateway expense-processor ai-engine policy-engine; do
-  gcloud run deploy expense-$service \
-    --image gcr.io/$PROJECT_ID/expense-$service:latest \
-    --platform managed \
-    --region us-central1 \
-    --allow-unauthenticated \
-    --set-env-vars "DATABASE_URL=$DATABASE_URL,REDIS_URL=$REDIS_URL"
-done
-```
-
-### Option C: Kubernetes (AWS EKS / GKE)
-
-```bash
-# 1. Create cluster (EKS example)
-eksctl create cluster --name expense-platform --region us-east-1 \
-  --nodegroup-name workers --node-type t3.large --nodes 3
-
-# 2. Apply base manifests
-kubectl apply -k infrastructure/k8s/base/
-
-# 3. Apply environment overlay
-kubectl apply -k infrastructure/k8s/overlays/prod/
-
-# 4. Verify
-kubectl get pods -n expense-platform
-kubectl get svc -n expense-platform
-```
-
-### Option D: Docker Compose on a Single VM
-
-```bash
-# For staging/demo environments
 ssh user@your-server
 git clone https://github.com/AmosBunde/AI-Expense-Intelligence-Automation-Platform.git
 cd AI-Expense-Intelligence-Automation-Platform
-
-cp .env.example .env.prod   # fill in real secrets — startup fails if any are missing
-
-# Pin IMAGE_TAG to a commit SHA for reproducible deploys (latest is dev-only)
-IMAGE_TAG=<commit-sha> docker compose \
-  -f infrastructure/docker/docker-compose.prod.yml \
-  --env-file .env.prod up -d
+cp .env.example .env.prod      # fill in real secrets — startup fails if any are missing
+make prod IMAGE_TAG=<commit-sha>
 ```
 
-The production compose file pulls prebuilt GHCR images, publishes only the gateway (`:8000`) and dashboard (`:80`), and keeps Postgres/Redis/MinIO internal. Put a TLS terminator (Caddy, nginx, or a cloud LB) in front.
+Pulls prebuilt GHCR images, publishes only the gateway (`:8000`) and
+dashboard (`:80`), keeps infra internal. Put a TLS terminator (Caddy, nginx,
+or a cloud LB) in front.
+
+### Option B: Kubernetes (EKS / GKE)
+
+```bash
+# 1. Create the app-secrets Secret (see infrastructure/k8s/base/secrets.example.yaml)
+# 2. Set your real host in base/deployments.yaml (ConfigMap + Ingress)
+make k8s-dev        # or k8s-staging / k8s-prod
+kubectl get pods -n expense-platform -w
+```
+
+Prod overlay: 3 gateway + 3 AI-engine replicas, HPA 2→10, nginx ingress with
+cert-manager TLS. The dev overlay is the only one that permits demo login.
+
+### Option C: AWS ECS via Terraform
+
+```bash
+cd infrastructure/terraform/environments/prod
+terraform init && terraform plan -out=tfplan   # review: VPC, RDS, ElastiCache, ECS
+terraform apply tfplan
+```
 
 ---
 
 ## Environment Variables
 
+Copy [.env.example](.env.example) and fill in. The important ones:
+
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `DATABASE_URL` | PostgreSQL connection string | Yes |
-| `REDIS_URL` | Redis connection string | Yes |
-| `OPENAI_API_KEY` | OpenAI API key for LLM | Yes |
-| `S3_BUCKET` | S3 bucket for document storage | Yes |
-| `S3_ENDPOINT` | S3 endpoint (MinIO for local) | Local only |
-| `JWT_SECRET` | JWT signing secret | Yes |
-| `CELERY_BROKER_URL` | Celery broker URL | Yes |
-| `SMTP_HOST` | Email server host | Optional |
-| `SLACK_WEBHOOK_URL` | Slack notification URL | Optional |
-
----
+| `OPENAI_API_KEY` | LLM extraction, analysis, chat | Yes |
+| `DATABASE_URL` / `DATABASE_URL_SYNC` | PostgreSQL DSNs (async + sync) | Yes |
+| `REDIS_URL`, `CELERY_BROKER_URL` | Cache / rate limits / queues | Yes |
+| `JWT_SECRET` | Token signing — `openssl rand -hex 32`; prod refuses defaults | Yes |
+| `AUTH_USERS` | JSON of bcrypt-hashed users; prod logins disabled without it | Prod |
+| `ENVIRONMENT` | `production` enables fail-closed auth + HSTS | Prod |
+| `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_ENDPOINT` | Document storage (MinIO locally) | Yes |
+| `MAX_UPLOAD_MB`, `LOGIN_RATE_LIMIT_PER_MINUTE`, `RATE_LIMIT_PER_MINUTE` | Abuse limits (sane defaults) | No |
+| `SMTP_*`, `SLACK_WEBHOOK_URL` | Notification channels | No |
 
 ## Contributing
 
 1. Open (or pick) a GitHub issue describing the change.
-2. Branch from `main`: `<type>/issue-<number>-<short-description>` — types: `feat`, `fix`, `test`, `docs`, `infra`, `refactor`, `ci`.
-3. Commit using conventional messages referencing the issue: `feat(api-gateway): add refresh tokens (#42)`.
-4. Ensure `ruff check`, `pytest`, and (for UI changes) `pnpm test` pass locally — CI runs the same gates on the PR.
+2. Branch from `main`: `<type>/issue-<number>-<short-description>` — types: `feat`, `fix`, `test`, `docs`, `infra`, `security`, `ci`, `refactor`.
+3. Commit with conventional messages referencing the issue: `feat(api-gateway): add refresh tokens (#42)`.
+4. Run `make lint test` locally — CI runs the same gates on the PR.
 5. Open a PR against `main` with a problem statement, what changed, and how it was verified. PRs are squash-merged.
 
 ## Documentation
@@ -355,7 +388,7 @@ The production compose file pulls prebuilt GHCR images, publishes only the gatew
 - [Deployment Guide & Production Readiness Checklist](docs/deployment/DEPLOYMENT.md)
 - [Architecture Overview](docs/architecture/ARCHITECTURE.md) and [ADRs](docs/adr/)
 - [Git Issues & Implementation Plan](docs/ISSUES.md)
-- Interactive API docs: each FastAPI service serves Swagger UI at `/docs` and OpenAPI JSON at `/openapi.json` (see [Service Ports](#service-ports))
+- Interactive API docs: every FastAPI service serves Swagger UI at `/docs` and OpenAPI JSON at `/openapi.json`
 
 ## License
 
