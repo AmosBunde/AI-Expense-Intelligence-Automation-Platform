@@ -4,6 +4,8 @@ Handles authentication, rate limiting, request routing, and response aggregation
 """
 from __future__ import annotations
 
+import base64
+import json
 import os
 import time
 import uuid
@@ -11,10 +13,11 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
+import bcrypt
 import httpx
 import jwt
 import redis.asyncio as redis
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Query, status
+from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
@@ -29,6 +32,7 @@ START_TIME = time.time()
 class Settings(BaseModel):
     database_url: str = os.getenv("DATABASE_URL", "")
     redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    environment: str = os.getenv("ENVIRONMENT", "development")
     jwt_secret: str = os.getenv("JWT_SECRET", "dev-secret")
     jwt_algorithm: str = "HS256"
     jwt_expiration_minutes: int = 60
@@ -39,9 +43,47 @@ class Settings(BaseModel):
     rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
     s3_bucket: str = os.getenv("S3_BUCKET", "expense-documents")
     s3_endpoint: str = os.getenv("S3_ENDPOINT", "http://localhost:9000")
+    max_upload_mb: int = int(os.getenv("MAX_UPLOAD_MB", "10"))
+    max_batch_upload_mb: int = int(os.getenv("MAX_BATCH_UPLOAD_MB", "50"))
+    # JSON mapping of email -> {"password_hash": "<bcrypt>", "role": "...",
+    # "org": "..."}. When set, login validates strictly against it. When unset,
+    # production refuses logins entirely; dev/test fall back to demo mode.
+    auth_users: str = os.getenv("AUTH_USERS", "")
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment.lower() in ("production", "prod")
 
 
 settings = Settings()
+
+if settings.is_production and settings.jwt_secret in ("", "dev-secret"):
+    raise RuntimeError(
+        "Refusing to start: JWT_SECRET must be set to a strong value in production "
+        "(generate one with `openssl rand -hex 32`)."
+    )
+
+ALLOWED_RECEIPT_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/heic",
+    "application/pdf",
+}
+ALLOWED_BATCH_TYPES = {
+    "text/csv",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+
+def _load_auth_users() -> dict[str, dict]:
+    if not settings.auth_users:
+        return {}
+    try:
+        return json.loads(settings.auth_users)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("AUTH_USERS is not valid JSON") from exc
 
 
 # =============================================================================
@@ -68,9 +110,25 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    if settings.is_production:
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
+        )
+    return response
+
 
 security = HTTPBearer()
 
@@ -150,14 +208,39 @@ async def rate_limit(user: TokenPayload = Depends(get_current_user)):
 
 @app.post("/api/v1/auth/login", response_model=TokenResponse, tags=["auth"])
 async def login(request: LoginRequest):
-    """Authenticate and receive a JWT token."""
-    # In production: validate against database with bcrypt
-    # Stub for demonstration
-    token = create_token(
-        user_id=str(uuid.uuid4()),
-        org_id=str(uuid.uuid4()),
-        role="employee",
-    )
+    """Authenticate and receive a JWT token.
+
+    Credential sources, in order:
+    - AUTH_USERS configured: strict bcrypt validation, unknown users rejected.
+    - No AUTH_USERS in production: logins disabled (503) — never a silent bypass.
+    - No AUTH_USERS in dev/test: demo mode, any credentials get an employee token.
+    """
+    users = _load_auth_users()
+    if users:
+        record = users.get(request.email.lower())
+        password_ok = record is not None and bcrypt.checkpw(
+            request.password.encode(), record["password_hash"].encode()
+        )
+        if not password_ok:
+            # Same error for unknown user and bad password: no account enumeration
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        token = create_token(
+            user_id=record.get("user_id", request.email.lower()),
+            org_id=record.get("org", "default-org"),
+            role=record.get("role", "employee"),
+        )
+    elif settings.is_production:
+        raise HTTPException(
+            status_code=503,
+            detail="Login is not configured. Set AUTH_USERS on the gateway.",
+        )
+    else:
+        # Demo mode for local development and tests only
+        token = create_token(
+            user_id=str(uuid.uuid4()),
+            org_id=str(uuid.uuid4()),
+            role="employee",
+        )
     return TokenResponse(
         access_token=token,
         expires_in=settings.jwt_expiration_minutes * 60,
@@ -185,9 +268,23 @@ async def upload_expense(
     user: TokenPayload = Depends(rate_limit),
 ):
     """Upload a receipt/invoice for AI processing."""
+    if file.content_type not in ALLOWED_RECEIPT_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type {file.content_type!r}. "
+            f"Allowed: {sorted(ALLOWED_RECEIPT_TYPES)}",
+        )
+
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    file_content = await file.read(max_bytes + 1)
+    if len(file_content) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds the {settings.max_upload_mb} MB upload limit",
+        )
+
     # 1. Upload file to S3
     file_key = f"{user.org}/{user.sub}/{uuid.uuid4()}/{file.filename}"
-    file_content = await file.read()
 
     # 2. Forward to expense processor
     client: httpx.AsyncClient = app.state.http_client
@@ -198,7 +295,7 @@ async def upload_expense(
             "document_type": document_type,
             "user_id": user.sub,
             "organization_id": user.org,
-            "file_content_b64": __import__("base64").b64encode(file_content).decode(),
+            "file_content_b64": base64.b64encode(file_content).decode(),
         },
     )
 
@@ -387,11 +484,25 @@ async def trigger_batch(
     if user.role not in ("admin", "finance"):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    content = await file.read()
+    if file.content_type not in ALLOWED_BATCH_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported batch file type {file.content_type!r}. "
+            "Upload CSV or Excel.",
+        )
+
+    max_bytes = settings.max_batch_upload_mb * 1024 * 1024
+    content = await file.read(max_bytes + 1)
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Batch file exceeds the {settings.max_batch_upload_mb} MB limit",
+        )
+
     # Queue batch job via Celery
     from packages.queue_client.tasks import process_batch
     task = process_batch.delay(
-        file_content_b64=__import__("base64").b64encode(content).decode(),
+        file_content_b64=base64.b64encode(content).decode(),
         filename=file.filename,
         organization_id=user.org,
         user_id=user.sub,
