@@ -56,7 +56,7 @@ export default function Chat() {
       </header>
 
       <div className="chat">
-        <div className="scroll" ref={scrollRef}>
+        <div className="scroll" ref={scrollRef} aria-live="polite" aria-label="Conversation">
           {messages.map((m, i) => (
             <div key={i} className={`msg ${m.who}`}>
               <span className="who">{m.who === "user" ? "You" : "Analyst"}</span>
@@ -100,7 +100,7 @@ export default function Chat() {
 
       <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
         {SUGGESTIONS.map((s) => (
-          <button key={s} className="theme-toggle" onClick={() => void send(s)} disabled={busy}>
+          <button key={s} className="chip" onClick={() => void send(s)} disabled={busy}>
             {s}
           </button>
         ))}

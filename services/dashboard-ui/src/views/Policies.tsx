@@ -61,8 +61,10 @@ export default function Policies(props: { role: string }) {
         )}
       </header>
 
-      {error ? <div className="error-note">{error}</div> : null}
-      {note ? <div className="pill" style={{ marginBottom: 16, display: "inline-block" }}>{note}</div> : null}
+      {error ? <div className="error-note" role="alert">{error}</div> : null}
+      <div aria-live="polite">
+        {note ? <div className="pill" style={{ marginBottom: 16, display: "inline-block" }}>{note}</div> : null}
+      </div>
 
       {showForm && editor ? (
         <form className="panel" style={{ marginBottom: 24 }} onSubmit={submit}>

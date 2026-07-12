@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { approveExpense, fetchExpenses, type Expense } from "../lib/api";
 import { formatDate, formatMoney, statusTone } from "../lib/format";
 
@@ -13,25 +13,60 @@ export default function Expenses(props: { role: string }) {
   const [selected, setSelected] = useState<Expense | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const closeBtnRef = useRef<HTMLButtonElement>(null);
+  const lastFocusRef = useRef<HTMLElement | null>(null);
 
   function load() {
     setError(null);
+    setLoading(true);
     fetchExpenses({ page, status: status || undefined })
       .then((r) => {
         setItems(r.items);
         setTotal(r.total);
       })
-      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load"));
+      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load"))
+      .finally(() => setLoading(false));
   }
 
   useEffect(load, [page, status]);
+
+  // Success notes behave like toasts: announce politely, then clear
+  useEffect(() => {
+    if (!note) return;
+    const t = setTimeout(() => setNote(null), 4000);
+    return () => clearTimeout(t);
+  }, [note]);
+
+  // Drawer focus management: focus close on open, Escape closes,
+  // focus returns to the row that opened it
+  useEffect(() => {
+    if (!selected) return;
+    closeBtnRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeDrawer();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected]);
+
+  function openDrawer(exp: Expense, origin: HTMLElement) {
+    lastFocusRef.current = origin;
+    setSelected(exp);
+  }
+
+  function closeDrawer() {
+    setSelected(null);
+    lastFocusRef.current?.focus();
+  }
 
   async function approve(exp: Expense) {
     setNote(null);
     try {
       await approveExpense(exp.expense_id);
       setNote(`Approved ${exp.expense_id}`);
-      setSelected(null);
+      closeDrawer();
       load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Approval failed");
@@ -64,10 +99,18 @@ export default function Expenses(props: { role: string }) {
         </div>
       </header>
 
-      {error ? <div className="error-note">{error}</div> : null}
-      {note ? <div className="pill" style={{ marginBottom: 16, display: "inline-block" }}>{note}</div> : null}
+      {error ? <div className="error-note" role="alert">{error}</div> : null}
+      <div aria-live="polite">
+        {note ? <div className="pill" style={{ marginBottom: 16, display: "inline-block" }}>{note}</div> : null}
+      </div>
 
-      {items.length === 0 ? (
+      {loading ? (
+        <div className="skeleton-row" aria-hidden>
+          {[0, 1, 2, 3, 4].map((i) => (
+            <div key={i} className="skeleton" style={{ height: 44 }} />
+          ))}
+        </div>
+      ) : items.length === 0 ? (
         <div className="empty">No expenses match this filter.</div>
       ) : (
         <div className="table-scroll">
@@ -83,7 +126,19 @@ export default function Expenses(props: { role: string }) {
             </thead>
             <tbody>
               {items.map((exp) => (
-                <tr key={exp.expense_id} className="rowbtn" onClick={() => setSelected(exp)}>
+                <tr
+                  key={exp.expense_id}
+                  className="rowbtn"
+                  tabIndex={0}
+                  aria-label={`${exp.merchant}, ${formatMoney(exp.amount, exp.currency)}, ${exp.status} — open details`}
+                  onClick={(e) => openDrawer(exp, e.currentTarget)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      openDrawer(exp, e.currentTarget);
+                    }
+                  }}
+                >
                   <td>{exp.merchant}</td>
                   <td className="muted">{exp.category}</td>
                   <td className="num">{formatMoney(exp.amount, exp.currency)}</td>
@@ -110,11 +165,11 @@ export default function Expenses(props: { role: string }) {
 
       {selected ? (
         <>
-          <div className="drawer-scrim" onClick={() => setSelected(null)} />
-          <aside className="drawer" aria-label="Expense detail">
+          <div className="drawer-scrim" onClick={closeDrawer} />
+          <aside className="drawer" role="dialog" aria-modal="true" aria-label={`Expense ${selected.expense_id} details`}>
             <div className="panel-head">
               <span className="kicker">{selected.expense_id}</span>
-              <button className="theme-toggle" onClick={() => setSelected(null)}>
+              <button ref={closeBtnRef} className="chip" onClick={closeDrawer}>
                 close
               </button>
             </div>
