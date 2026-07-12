@@ -1,0 +1,40 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Staging overlay: two replicas of the request-serving services, GHCR images
+# pinned by IMAGE_TAG at deploy time (edit newTag or use `kustomize edit set
+# image`). Apply with:
+#   kubectl apply -k infrastructure/k8s/overlays/staging/
+
+namespace: expense-platform
+
+resources:
+  - ../../base
+
+images:
+  - name: expense-api-gateway
+    newName: ghcr.io/amosbunde/expense-api-gateway
+    newTag: latest
+  - name: expense-ai-engine
+    newName: ghcr.io/amosbunde/expense-ai-engine
+    newTag: latest
+  - name: expense-expense-processor
+    newName: ghcr.io/amosbunde/expense-expense-processor
+    newTag: latest
+  - name: expense-policy-engine
+    newName: ghcr.io/amosbunde/expense-policy-engine
+    newTag: latest
+  - name: expense-dashboard-ui
+    newName: ghcr.io/amosbunde/expense-dashboard-ui
+    newTag: latest
+
+patches:
+  - target:
+      kind: Deployment
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 2
+
+commonAnnotations:
+  environment: staging
