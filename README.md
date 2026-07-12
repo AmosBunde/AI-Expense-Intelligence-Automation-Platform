@@ -1,6 +1,24 @@
 # AI Expense Intelligence & Automation Platform
 
+[![CI/CD Pipeline](https://github.com/AmosBunde/AI-Expense-Intelligence-Automation-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/AmosBunde/AI-Expense-Intelligence-Automation-Platform/actions/workflows/ci.yml)
+[![Release Images](https://github.com/AmosBunde/AI-Expense-Intelligence-Automation-Platform/actions/workflows/release.yml/badge.svg)](https://github.com/AmosBunde/AI-Expense-Intelligence-Automation-Platform/actions/workflows/release.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
+![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
+![React 18](https://img.shields.io/badge/react-18-61dafb)
+
 > An AI-powered system that categorizes, analyzes, and automates business spend workflows. Ingests receipts, invoices, and transaction data. Extracts structured fields via LLM. Enriches with company policies via RAG. Agents flag anomalies, detect fraud, and suggest actions. Automates approvals and categorization. Dashboards show spend insights. Supports real-time inference and batch processing.
+
+## Table of Contents
+
+- [Architecture Overview](#architecture-overview)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Service Ports](#service-ports)
+- [Local Development Setup](#local-development-setup)
+- [Cloud Deployment](#cloud-deployment)
+- [Environment Variables](#environment-variables)
+- [Contributing](#contributing)
+- [Documentation](#documentation)
 
 ## Architecture Overview
 
@@ -70,6 +88,23 @@ expense-intelligence-platform/
 └── .claude/skills/           # Claude Code implementation skill
 ```
 
+## Service Ports
+
+| Service | Port (local) | Swagger docs | Container image |
+|---------|-------------|--------------|-----------------|
+| API Gateway | 8000 | `http://localhost:8000/docs` | `ghcr.io/amosbunde/expense-api-gateway` |
+| AI Engine | 8001 | `http://localhost:8001/docs` | `ghcr.io/amosbunde/expense-ai-engine` |
+| Expense Processor | 8002 | `http://localhost:8002/docs` | `ghcr.io/amosbunde/expense-expense-processor` |
+| Policy Engine | 8003 | `http://localhost:8003/docs` | `ghcr.io/amosbunde/expense-policy-engine` |
+| Notification Service | 8004 | `http://localhost:8004/docs` | — (shares policy-engine image) |
+| Batch Processor | 8005 | `http://localhost:8005/docs` | — (shares expense-processor image) |
+| Dashboard UI | 5173 (dev) / 80 (container) | — | `ghcr.io/amosbunde/expense-dashboard-ui` |
+| PostgreSQL (pgvector) | 5432 | — | `pgvector/pgvector:pg16` |
+| Redis | 6379 | — | `redis:7-alpine` |
+| MinIO | 9000 (API) / 9001 (console) | — | `minio/minio` |
+
+Images are published to GHCR by the [Release Images workflow](.github/workflows/release.yml) on every push to `main` (tagged `latest` + commit SHA) and on `v*.*.*` tags (semver).
+
 ---
 
 ## Local Development Setup
@@ -84,8 +119,8 @@ expense-intelligence-platform/
 ### Step 1: Clone and Configure
 
 ```bash
-git clone https://github.com/your-org/expense-intelligence-platform.git
-cd expense-intelligence-platform
+git clone https://github.com/AmosBunde/AI-Expense-Intelligence-Automation-Platform.git
+cd AI-Expense-Intelligence-Automation-Platform
 
 # Copy environment template
 cp .env.example .env
@@ -198,6 +233,8 @@ locust -f tests/load/locustfile.py --host=http://localhost:8000
 
 ## Cloud Deployment
 
+> **Start here:** the step-by-step [Deployment Guide](docs/deployment/DEPLOYMENT.md) covers the release/image flow, required secrets, database migrations, smoke tests, rollback, and a production readiness checklist. The sections below are quick references per target.
+
 ### Option A: Docker + AWS ECS (Recommended for Production)
 
 ```bash
@@ -273,11 +310,19 @@ kubectl get svc -n expense-platform
 
 ```bash
 # For staging/demo environments
-scp -r . user@your-server:~/expense-platform
 ssh user@your-server
-cd ~/expense-platform
-docker compose -f infrastructure/docker/docker-compose.prod.yml up -d
+git clone https://github.com/AmosBunde/AI-Expense-Intelligence-Automation-Platform.git
+cd AI-Expense-Intelligence-Automation-Platform
+
+cp .env.example .env.prod   # fill in real secrets — startup fails if any are missing
+
+# Pin IMAGE_TAG to a commit SHA for reproducible deploys (latest is dev-only)
+IMAGE_TAG=<commit-sha> docker compose \
+  -f infrastructure/docker/docker-compose.prod.yml \
+  --env-file .env.prod up -d
 ```
+
+The production compose file pulls prebuilt GHCR images, publishes only the gateway (`:8000`) and dashboard (`:80`), and keeps Postgres/Redis/MinIO internal. Put a TLS terminator (Caddy, nginx, or a cloud LB) in front.
 
 ---
 
@@ -297,13 +342,20 @@ docker compose -f infrastructure/docker/docker-compose.prod.yml up -d
 
 ---
 
+## Contributing
+
+1. Open (or pick) a GitHub issue describing the change.
+2. Branch from `main`: `<type>/issue-<number>-<short-description>` — types: `feat`, `fix`, `test`, `docs`, `infra`, `refactor`, `ci`.
+3. Commit using conventional messages referencing the issue: `feat(api-gateway): add refresh tokens (#42)`.
+4. Ensure `ruff check`, `pytest`, and (for UI changes) `pnpm test` pass locally — CI runs the same gates on the PR.
+5. Open a PR against `main` with a problem statement, what changed, and how it was verified. PRs are squash-merged.
+
 ## Documentation
 
-- [Architecture Decision Records](docs/adr/)
-- [API Documentation](docs/api/) (auto-generated from OpenAPI)
-- [C4 Architecture Diagrams](docs/architecture/)
-- [Deployment Guide](docs/deployment/)
+- [Deployment Guide & Production Readiness Checklist](docs/deployment/DEPLOYMENT.md)
+- [Architecture Overview](docs/architecture/ARCHITECTURE.md) and [ADRs](docs/adr/)
 - [Git Issues & Implementation Plan](docs/ISSUES.md)
+- Interactive API docs: each FastAPI service serves Swagger UI at `/docs` and OpenAPI JSON at `/openapi.json` (see [Service Ports](#service-ports))
 
 ## License
 
