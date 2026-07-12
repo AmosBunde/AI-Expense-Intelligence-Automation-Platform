@@ -1,0 +1,224 @@
+# Production Docker Compose — single-VM deployment (README deployment Option D).
+#
+# Differences from the root docker-compose.yml (development):
+#   - pulls prebuilt images from GHCR (published by .github/workflows/release.yml)
+#     instead of building from source; pin IMAGE_TAG to a commit SHA for
+#     reproducible deploys
+#   - no source bind mounts, no --reload
+#   - infrastructure ports (Postgres/Redis/MinIO) are NOT published to the host;
+#     only the gateway (8000) and dashboard (80) are reachable
+#   - restart policies, log rotation, and memory limits on every service
+#   - all secrets come from an env file, never inline defaults
+#
+# Usage:
+#   cp .env.example .env.prod   # then fill in real values
+#   docker compose -f infrastructure/docker/docker-compose.prod.yml --env-file .env.prod up -d
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-common-env: &common-env
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-expense_db}
+  DATABASE_URL_SYNC: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-expense_db}
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  S3_BUCKET: ${S3_BUCKET:-expense-documents}
+  S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+  S3_ACCESS_KEY: ${S3_ACCESS_KEY:?set in env file}
+  S3_SECRET_KEY: ${S3_SECRET_KEY:?set in env file}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:?set in env file}
+  JWT_SECRET: ${JWT_SECRET:?set in env file}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  ENVIRONMENT: production
+
+services:
+  # ---- Infrastructure ----
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-expense_db}
+      POSTGRES_USER: ${POSTGRES_USER:?set in env file}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in env file}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+
+  minio:
+    image: minio/minio:latest
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:?set in env file}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:?set in env file}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  # ---- Application Services ----
+  api-gateway:
+    image: ghcr.io/amosbunde/expense-api-gateway:${IMAGE_TAG:-latest}
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+      EXPENSE_PROCESSOR_URL: http://expense-processor:8002
+      AI_ENGINE_URL: http://ai-engine:8001
+      POLICY_ENGINE_URL: http://policy-engine:8003
+      CORS_ORIGINS: ${CORS_ORIGINS:?set to your dashboard origin}
+    depends_on:
+      redis:
+        condition: service_healthy
+      expense-processor:
+        condition: service_started
+      ai-engine:
+        condition: service_started
+      policy-engine:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  expense-processor:
+    image: ghcr.io/amosbunde/expense-expense-processor:${IMAGE_TAG:-latest}
+    environment:
+      <<: *common-env
+      AI_ENGINE_URL: http://ai-engine:8001
+      POLICY_ENGINE_URL: http://policy-engine:8003
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 1500m
+
+  ai-engine:
+    image: ghcr.io/amosbunde/expense-ai-engine:${IMAGE_TAG:-latest}
+    environment:
+      <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  policy-engine:
+    image: ghcr.io/amosbunde/expense-policy-engine:${IMAGE_TAG:-latest}
+    environment:
+      <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+
+  celery-worker:
+    image: ghcr.io/amosbunde/expense-api-gateway:${IMAGE_TAG:-latest}
+    command: celery -A packages.queue_client.src.tasks worker --loglevel=info --concurrency=4
+    environment:
+      <<: *common-env
+      EXPENSE_PROCESSOR_URL: http://expense-processor:8002
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 1500m
+
+  celery-beat:
+    image: ghcr.io/amosbunde/expense-api-gateway:${IMAGE_TAG:-latest}
+    command: celery -A packages.queue_client.src.tasks beat --loglevel=info
+    environment:
+      <<: *common-env
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  dashboard-ui:
+    image: ghcr.io/amosbunde/expense-dashboard-ui:${IMAGE_TAG:-latest}
+    ports:
+      - "80:80"
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+volumes:
+  postgres_data:
+  minio_data:
