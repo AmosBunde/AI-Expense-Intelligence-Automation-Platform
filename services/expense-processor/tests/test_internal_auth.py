@@ -38,3 +38,12 @@ def test_valid_token_passes_middleware(token_configured):
 def test_open_when_no_token_configured(monkeypatch):
     monkeypatch.setattr(main, "INTERNAL_API_TOKEN", "")
     assert client.get("/definitely/not/a/route").status_code == 404
+
+
+def test_outbound_calls_carry_internal_token(monkeypatch):
+    # The processor is a caller too: its ai-engine/policy-engine requests
+    # must attach the token or they 401 against hardened services
+    monkeypatch.setenv("INTERNAL_API_TOKEN", "outbound-secret")
+    assert main._internal_headers() == {"X-Internal-Token": "outbound-secret"}
+    monkeypatch.delenv("INTERNAL_API_TOKEN")
+    assert main._internal_headers() == {}

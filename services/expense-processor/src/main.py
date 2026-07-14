@@ -20,6 +20,12 @@ START_TIME = time.time()
 AI_ENGINE_URL = os.getenv("AI_ENGINE_URL", "http://localhost:8001")
 POLICY_ENGINE_URL = os.getenv("POLICY_ENGINE_URL", "http://localhost:8003")
 
+def _internal_headers() -> dict[str, str]:
+    """Auth header for calls to other internal services (ai-engine, policy-engine)."""
+    token = os.getenv("INTERNAL_API_TOKEN", "")
+    return {"X-Internal-Token": token} if token else {}
+
+
 
 app = FastAPI(title="Expense Processor", version="1.0.0")
 
@@ -162,28 +168,33 @@ async def process_expense(request: ProcessRequest):
     # Step 2: Extract text
     raw_text = await extract_text_from_document(file_bytes, request.document_type)
 
-    # Step 3: AI extraction + fraud analysis
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        ai_response = await client.post(
-            f"{AI_ENGINE_URL}/analyze",
-            json={
-                "expense_id": expense_id,
-                "organization_id": request.organization_id,
-                "raw_text": raw_text,
-            },
-        )
-
-        if ai_response.status_code != 200:
-            raise HTTPException(status_code=502, detail="AI Engine analysis failed")
-
-        ai_result = ai_response.json()
+    # Step 3: AI extraction + fraud analysis.
+    # AI unavailability must not block receipt intake: on failure we keep the
+    # OCR text, skip enrichment, and force human review instead of erroring.
+    ai_result: dict = {}
+    ai_available = False
+    async with httpx.AsyncClient(timeout=60.0, headers=_internal_headers()) as client:
+        try:
+            ai_response = await client.post(
+                f"{AI_ENGINE_URL}/analyze",
+                json={
+                    "expense_id": expense_id,
+                    "organization_id": request.organization_id,
+                    "raw_text": raw_text,
+                },
+            )
+            if ai_response.status_code == 200:
+                ai_result = ai_response.json()
+                ai_available = True
+        except httpx.HTTPError:
+            pass
 
     # Step 4: Normalize
     extraction = ai_result.get("extraction", {})
     normalized = normalize_extraction(extraction)
 
     # Step 5: Policy check
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, headers=_internal_headers()) as client:
         policy_response = await client.post(
             f"{POLICY_ENGINE_URL}/check",
             json={
@@ -199,11 +210,15 @@ async def process_expense(request: ProcessRequest):
         policy_result = policy_response.json() if policy_response.status_code == 200 else {}
 
     # Step 6: Determine final status
-    fraud = ai_result.get("fraud_analysis", {})
+    fraud = ai_result.get("fraud_analysis") or {}
     risk_level = fraud.get("risk_level", "low")
     is_compliant = policy_result.get("is_compliant", True)
 
-    if risk_level in ("high", "critical") or not is_compliant:
+    if not ai_available:
+        # No fraud signal and possibly incomplete extraction: never auto-
+        # approve, always route to a human
+        status = "needs_review"
+    elif risk_level in ("high", "critical") or not is_compliant:
         status = "flagged"
     elif policy_result.get("auto_approved", False):
         status = "approved"

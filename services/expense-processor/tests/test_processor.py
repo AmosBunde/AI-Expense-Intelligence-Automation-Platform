@@ -171,3 +171,41 @@ class TestProcessorEndpoints:
         assert data["service"] == "expense-processor"
         assert data["status"] == "ok"
         assert "uptime_seconds" in data
+
+
+class TestAIDegradedPath:
+    """AI engine unavailability must not block receipt intake."""
+
+    def test_process_succeeds_with_needs_review_when_ai_down(self, monkeypatch):
+        import base64 as b64
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        import httpx as _httpx
+        from fastapi.testclient import TestClient
+
+        from src.main import app
+
+        ai_fail = MagicMock(status_code=503)
+        policy_ok = MagicMock(status_code=200)
+        policy_ok.json.return_value = {"is_compliant": True, "auto_approved": False}
+
+        async_client = MagicMock()
+        async_client.__aenter__ = AsyncMock(return_value=async_client)
+        async_client.__aexit__ = AsyncMock(return_value=False)
+        async_client.post = AsyncMock(side_effect=[ai_fail, policy_ok])
+
+        with patch("src.main.httpx.AsyncClient", return_value=async_client):
+            client = TestClient(app)
+            resp = client.post(
+                "/process",
+                json={
+                    "file_key": "k",
+                    "document_type": "receipt",
+                    "user_id": "u",
+                    "organization_id": "o",
+                    "file_content_b64": b64.b64encode(b"RECEIPT Total: $5").decode(),
+                },
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "needs_review"
