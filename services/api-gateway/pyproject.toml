@@ -16,6 +16,7 @@ dependencies = [
     "pydantic[email]>=2.0",
     "python-multipart>=0.0.7",
     "bcrypt>=4.0",
+    "celery[redis]>=5.4",
 ]
 
 [project.optional-dependencies]

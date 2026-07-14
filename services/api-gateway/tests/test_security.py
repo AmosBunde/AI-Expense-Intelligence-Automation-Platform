@@ -98,15 +98,27 @@ class TestCredentialValidation:
         )
         assert response.status_code == 503
 
-    def test_login_rate_limited_per_ip(self, client, monkeypatch):
+    def test_login_rate_limited_per_ip(self, monkeypatch):
+        # All 5 requests must share one event loop (fakeredis connections are
+        # loop-bound), so drive the ASGI app directly instead of TestClient
+        import asyncio
+
         monkeypatch.setattr(settings, "login_rate_limit_per_minute", 3)
-        responses = [
-            client.post(
-                "/api/v1/auth/login",
-                json={"email": "any@corp.com", "password": "x"},
-            ).status_code
-            for _ in range(5)
-        ]
+
+        async def run() -> list[int]:
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+                return [
+                    (
+                        await ac.post(
+                            "/api/v1/auth/login",
+                            json={"email": "any@corp.com", "password": "x"},
+                        )
+                    ).status_code
+                    for _ in range(5)
+                ]
+
+        responses = asyncio.run(run())
         assert responses[:3] == [200, 200, 200]
         assert responses[3] == 429
         assert responses[4] == 429
@@ -158,6 +170,29 @@ class TestUploadLimits:
             files={"file": ("data.pdf", io.BytesIO(b"%PDF"), "application/pdf")},
         )
         assert response.status_code == 415
+
+    def test_batch_enqueues_by_task_name(self, client):
+        from unittest.mock import MagicMock
+
+        fake_celery = MagicMock()
+        fake_celery.send_task.return_value = MagicMock(id="task-123")
+        app.state.celery = fake_celery
+
+        token = create_token("u1", "o1", "finance")
+        response = client.post(
+            "/api/v1/batch/process",
+            headers={"Authorization": f"Bearer {token}"},
+            files={"file": ("data.csv", io.BytesIO(b"a,b\n1,2"), "text/csv")},
+        )
+        assert response.status_code == 200
+        assert response.json() == {"batch_id": "task-123", "status": "queued"}
+        name, kwargs = (
+            fake_celery.send_task.call_args.args[0],
+            fake_celery.send_task.call_args.kwargs,
+        )
+        # Task name and queue must match the worker's task_routes
+        assert name == "tasks.process_batch"
+        assert kwargs["queue"] == "batch_processing"
 
 
 class TestProductionFailFast:

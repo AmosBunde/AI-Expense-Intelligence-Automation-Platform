@@ -299,7 +299,8 @@ cd services/api-gateway        && pip install -e ".[dev]" && uvicorn src.main:ap
 cd services/ai-engine          && pip install -e ".[dev]" && uvicorn src.main:app --reload --port 8001
 cd services/expense-processor  && pip install -e ".[dev]" && uvicorn src.main:app --reload --port 8002
 cd services/policy-engine      && pip install -e ".[dev]" && uvicorn src.main:app --reload --port 8003
-celery -A packages.queue_client.app worker --loglevel=info
+PYTHONPATH=packages/queue-client/src celery -A tasks:celery_app worker \
+  --loglevel=info -Q expense_processing,batch_processing,reporting,notifications
 
 cd services/dashboard-ui && pnpm install && pnpm dev
 ```
