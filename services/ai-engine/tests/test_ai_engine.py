@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from services.ai_engine.src.main import (
+from src.main import (
     app,
     build_analysis_graph,
     build_chat_graph,

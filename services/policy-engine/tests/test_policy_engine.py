@@ -4,7 +4,7 @@ Tests for Policy Engine - Rule evaluation, compliance checking, auto-approval.
 import pytest
 from fastapi.testclient import TestClient
 
-from services.policy_engine.src.main import (
+from src.main import (
     app,
     RuleEvaluator,
     PolicyRule,

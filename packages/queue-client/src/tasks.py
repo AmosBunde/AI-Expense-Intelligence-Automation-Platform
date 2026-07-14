@@ -7,6 +7,12 @@ import os
 
 from celery import Celery
 
+def _internal_headers() -> dict[str, str]:
+    """Auth header for calls to internal services (see INTERNAL_API_TOKEN)."""
+    token = os.getenv("INTERNAL_API_TOKEN", "")
+    return {"X-Internal-Token": token} if token else {}
+
+
 BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/1")
 RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/2")
 
@@ -41,7 +47,7 @@ def process_single(self, expense_id: str, file_key: str, organization_id: str):
 
     processor_url = os.getenv("EXPENSE_PROCESSOR_URL", "http://localhost:8002")
     try:
-        with httpx.Client(timeout=120.0) as client:
+        with httpx.Client(timeout=120.0, headers=_internal_headers()) as client:
             response = client.post(
                 f"{processor_url}/process",
                 json={
@@ -114,7 +120,7 @@ def send_notification(
     subject = context.get("subject", template.replace("_", " ").capitalize())
     message = context.get("message", "")
     try:
-        with httpx.Client(timeout=15.0) as client:
+        with httpx.Client(timeout=15.0, headers=_internal_headers()) as client:
             resp = client.post(
                 f"{service_url}/notify",
                 json={

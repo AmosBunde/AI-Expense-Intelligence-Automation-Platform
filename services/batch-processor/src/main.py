@@ -26,6 +26,32 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# ── Internal service-to-service authentication ───────────────────────────────
+# Only the gateway and workers may call this service. When INTERNAL_API_TOKEN
+# is set, every request except /health must present it in X-Internal-Token.
+# Production refuses to start without a token (fail closed).
+import hmac as _hmac
+
+from fastapi.responses import JSONResponse as _JSONResponse
+
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "")
+
+if not INTERNAL_API_TOKEN and os.getenv("ENVIRONMENT", "development").lower() in ("production", "prod"):
+    raise RuntimeError(
+        "Refusing to start: INTERNAL_API_TOKEN must be set in production "
+        "(generate one with `openssl rand -hex 32`)."
+    )
+
+
+@app.middleware("http")
+async def require_internal_token(request, call_next):
+    if INTERNAL_API_TOKEN and request.url.path != "/health":
+        provided = request.headers.get("X-Internal-Token", "")
+        if not _hmac.compare_digest(provided.encode(), INTERNAL_API_TOKEN.encode()):
+            return _JSONResponse(status_code=401, content={"detail": "Missing or invalid internal token"})
+    return await call_next(request)
+
+
 # Producer-only Celery app: enqueues by task name (same pattern as the gateway)
 celery_app = Celery(broker=os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/1"))
 

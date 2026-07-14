@@ -213,3 +213,17 @@ class TestProductionFailFast:
             import src.main as main_module
 
             importlib.reload(main_module)
+
+
+class TestInternalHeaders:
+    def test_header_attached_when_token_set(self, monkeypatch):
+        from src.main import internal_headers
+
+        monkeypatch.setenv("INTERNAL_API_TOKEN", "svc-secret")
+        assert internal_headers() == {"X-Internal-Token": "svc-secret"}
+
+    def test_no_header_when_unset(self, monkeypatch):
+        from src.main import internal_headers
+
+        monkeypatch.delenv("INTERNAL_API_TOKEN", raising=False)
+        assert internal_headers() == {}
