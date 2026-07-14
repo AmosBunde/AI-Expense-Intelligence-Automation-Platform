@@ -107,12 +107,34 @@ def generate_report(organization_id: str, period: str, report_type: str):
 def send_notification(
     channel: str, recipient: str, template: str, context: dict
 ):
-    """Send notification via email, Slack, or webhook."""
+    """Deliver a notification via the notification service."""
+    import httpx
+
+    service_url = os.getenv("NOTIFICATION_SERVICE_URL", "http://localhost:8004")
+    subject = context.get("subject", template.replace("_", " ").capitalize())
+    message = context.get("message", "")
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.post(
+                f"{service_url}/notify",
+                json={
+                    "channel": channel,
+                    "recipient": recipient,
+                    "subject": subject,
+                    "message": message,
+                    "metadata": {
+                        k: v for k, v in context.items() if k not in ("subject", "message")
+                    },
+                },
+            )
+        delivered = resp.status_code == 200 and resp.json().get("delivered", False)
+    except httpx.HTTPError:
+        delivered = False
     return {
         "channel": channel,
         "recipient": recipient,
         "template": template,
-        "status": "sent",
+        "status": "sent" if delivered else "not-delivered",
     }
 
 

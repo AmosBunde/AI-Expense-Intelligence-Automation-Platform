@@ -197,6 +197,8 @@ jobs:
           - ai-engine
           - policy-engine
           - dashboard-ui
+          - notification-service
+          - batch-processor
 
     steps:
       - uses: actions/checkout@v4

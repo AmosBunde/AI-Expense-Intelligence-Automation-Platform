@@ -99,17 +99,40 @@ class TestSendNotification:
     def test_task_name(self):
         assert send_notification.name == "tasks.send_notification"
 
-    def test_returns_notification_stub(self):
-        result = send_notification(
-            channel="email",
-            recipient="user@example.com",
-            template="expense_approved",
-            context={"expense_id": "exp-1"},
-        )
-        assert result["channel"] == "email"
-        assert result["recipient"] == "user@example.com"
-        assert result["template"] == "expense_approved"
+    def test_forwards_to_notification_service(self):
+        from unittest.mock import MagicMock, patch
+
+        fake_resp = MagicMock(status_code=200)
+        fake_resp.json.return_value = {"delivered": True}
+        with patch("httpx.Client") as client_cls:
+            post = client_cls.return_value.__enter__.return_value.post
+            post.return_value = fake_resp
+            result = send_notification(
+                channel="email",
+                recipient="user@example.com",
+                template="expense_approved",
+                context={"expense_id": "exp-1"},
+            )
+            url = post.call_args.args[0]
+            payload = post.call_args.kwargs["json"]
+        assert url.endswith("/notify")
+        assert payload["channel"] == "email"
+        assert payload["metadata"] == {"expense_id": "exp-1"}
         assert result["status"] == "sent"
+
+    def test_reports_not_delivered_when_service_down(self):
+        from unittest.mock import patch
+
+        import httpx as _httpx
+
+        with patch("httpx.Client") as client_cls:
+            client_cls.return_value.__enter__.return_value.post.side_effect = (
+                _httpx.ConnectError("down")
+            )
+            result = send_notification(
+                channel="slack", recipient="", template="fraud_alert", context={}
+            )
+        assert result["status"] == "not-delivered"
 
 
 class TestBeatSchedule:
