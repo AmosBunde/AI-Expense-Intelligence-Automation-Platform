@@ -11,7 +11,6 @@ from src.main import (
     app,
     build_analysis_graph,
     build_chat_graph,
-    normalize_extraction,
     should_analyze_fraud,
     EXTRACTION_PROMPT,
     FRAUD_ANALYSIS_PROMPT,
@@ -41,10 +40,15 @@ class TestFieldExtraction:
         """Extraction must output structured JSON."""
         assert "JSON" in EXTRACTION_PROMPT or "json" in EXTRACTION_PROMPT
 
-    @patch("services.ai_engine.src.main.llm")
+    @patch("src.main.get_llm")
     @pytest.mark.asyncio
-    async def test_analyze_endpoint(self, mock_llm, client):
+    async def test_analyze_endpoint(self, mock_get_llm, client):
         """Analyze endpoint accepts expense data and returns analysis."""
+        import src.main as main_mod
+
+        main_mod.get_analysis_graph.cache_clear()
+        mock_llm = MagicMock()
+        mock_get_llm.return_value = mock_llm
         mock_response = MagicMock()
         mock_response.content = json.dumps({
             "merchant_name": "Starbucks",
@@ -62,6 +66,7 @@ class TestFieldExtraction:
             "raw_text": "STARBUCKS #1234\n123 Main St\n04/10/2026\nGrande Latte  $5.75\nMuffin        $3.25\nTax           $0.50\nTotal:       $12.50\nVisa ****1234",
         })
         assert response.status_code == 200
+        main_mod.get_analysis_graph.cache_clear()
 
 
 # =========================================================================
@@ -132,10 +137,15 @@ class TestGraphArchitecture:
 # =========================================================================
 
 class TestChatAgent:
-    @patch("services.ai_engine.src.main.llm")
+    @patch("src.main.get_llm")
     @pytest.mark.asyncio
-    async def test_chat_endpoint(self, mock_llm, client):
+    async def test_chat_endpoint(self, mock_get_llm, client):
         """Chat endpoint accepts message and returns reply."""
+        import src.main as main_mod
+
+        main_mod.get_chat_graph.cache_clear()
+        mock_llm = MagicMock()
+        mock_get_llm.return_value = mock_llm
         mock_response = MagicMock()
         mock_response.content = "Your total spending this month is $3,450."
         mock_response.tool_calls = []
@@ -150,6 +160,7 @@ class TestChatAgent:
         assert response.status_code == 200
         data = response.json()
         assert "reply" in data
+        main_mod.get_chat_graph.cache_clear()
 
 
 # =========================================================================

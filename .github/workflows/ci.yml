@@ -126,6 +126,24 @@ jobs:
             --cov-report=xml:coverage-queue-client.xml \
             --cov-fail-under=70
 
+      - name: Install service dependencies
+        run: |
+          pip install bcrypt "celery[redis]" fakeredis \
+            langchain-core langchain-openai langgraph openai \
+            pytesseract pdf2image pillow
+
+      - name: Test services
+        env:
+          # Dummy key: the AI engine builds its LLM client lazily, but test
+          # fixtures that exercise graph nodes still construct clients
+          OPENAI_API_KEY: ci-dummy-key
+        run: |
+          for svc in api-gateway expense-processor ai-engine policy-engine \
+                     notification-service batch-processor; do
+            echo "── $svc ──"
+            (cd services/$svc && python -m pytest tests/ -q) || exit 1
+          done
+
       - name: Upload coverage reports
         if: always()
         uses: actions/upload-artifact@v4
