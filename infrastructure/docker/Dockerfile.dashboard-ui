@@ -1,9 +1,13 @@
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
+# Pin pnpm 9 (the lockfile's generator); corepack's unpinned fallback pulled
+# pnpm 11, which requires Node builtins newer than this base image
+RUN npm install -g pnpm@9
+
 COPY services/dashboard-ui/package.json services/dashboard-ui/pnpm-lock.yaml* ./
-RUN corepack enable && pnpm install --frozen-lockfile 2>/dev/null || pnpm install
+RUN pnpm install --frozen-lockfile
 
 COPY services/dashboard-ui/ .
 RUN pnpm build
