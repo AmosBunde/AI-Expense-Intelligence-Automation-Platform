@@ -230,7 +230,9 @@ class RuleEvaluator:
 
     @staticmethod
     def _check_fraud_risk(rule: PolicyRule, data: dict) -> dict | None:
-        fraud = data.get("fraud_analysis", {})
+        # `fraud_analysis` may be present but explicitly null (expense not
+        # yet analyzed) — `or {}` covers both missing and None
+        fraud = data.get("fraud_analysis") or {}
         risk_level = fraud.get("risk_level", "low")
         block_levels = rule.parameters.get("block_levels", ["high", "critical"])
         if risk_level in block_levels:

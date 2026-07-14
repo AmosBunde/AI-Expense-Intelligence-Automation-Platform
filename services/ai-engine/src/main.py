@@ -7,6 +7,7 @@ import os
 import time
 import uuid
 from contextlib import asynccontextmanager
+from functools import lru_cache
 from typing import Annotated, Sequence, TypedDict
 
 from fastapi import FastAPI, HTTPException
@@ -119,8 +120,17 @@ def search_similar_expenses(
 # Agent Nodes
 # =============================================================================
 
-llm = ChatOpenAI(model=OPENAI_MODEL, temperature=0, api_key=OPENAI_API_KEY)
-embeddings = OpenAIEmbeddings(model=EMBEDDING_MODEL, api_key=OPENAI_API_KEY)
+# LLM clients are created lazily: the OpenAI SDK raises without an API key,
+# and importing this module (health checks, tests, tooling) must not require
+# credentials. The first real analysis/chat call pays the construction cost once.
+@lru_cache(maxsize=1)
+def get_llm() -> ChatOpenAI:
+    return ChatOpenAI(model=OPENAI_MODEL, temperature=0, api_key=OPENAI_API_KEY)
+
+
+@lru_cache(maxsize=1)
+def get_embeddings() -> OpenAIEmbeddings:
+    return OpenAIEmbeddings(model=EMBEDDING_MODEL, api_key=OPENAI_API_KEY)
 
 
 EXTRACTION_PROMPT = """You are an expert expense data extractor. Given raw text from a receipt,
@@ -182,7 +192,7 @@ async def extract_fields_node(state: ExpenseAgentState) -> dict:
     expense_data = state["expense_data"]
     raw_text = expense_data.get("raw_text", "")
 
-    response = await llm.ainvoke([
+    response = await get_llm().ainvoke([
         SystemMessage(content=EXTRACTION_PROMPT),
         HumanMessage(content=f"Extract fields from this expense document:\n\n{raw_text}"),
     ])
@@ -232,7 +242,7 @@ Expense details:
 - Payment method: {extraction.get('payment_method', 'Unknown')}
 """
 
-    response = await llm.ainvoke([
+    response = await get_llm().ainvoke([
         SystemMessage(content=FRAUD_ANALYSIS_PROMPT),
         HumanMessage(content=context),
     ])
@@ -312,7 +322,7 @@ tools = [query_spend_patterns, search_similar_expenses]
 def build_chat_graph():
     """Conversational agent for expense queries."""
     tool_node = ToolNode(tools)
-    model_with_tools = llm.bind_tools(tools)
+    model_with_tools = get_llm().bind_tools(tools)
 
     async def agent_node(state: ExpenseAgentState):
         policy_context = "\n".join(state.get("policy_context", []))
@@ -337,8 +347,16 @@ def build_chat_graph():
     return graph.compile()
 
 
-analysis_graph = build_analysis_graph()
-chat_graph = build_chat_graph()
+# Graphs bind LLM clients, so they are also built lazily (first request),
+# keeping module import credential-free for health checks and tests.
+@lru_cache(maxsize=1)
+def get_analysis_graph():
+    return build_analysis_graph()
+
+
+@lru_cache(maxsize=1)
+def get_chat_graph():
+    return build_chat_graph()
 
 
 # =============================================================================
@@ -405,7 +423,7 @@ async def analyze_expense(request: AnalyzeRequest):
         "category_prediction": {},
     }
 
-    result = await analysis_graph.ainvoke(initial_state)
+    result = await get_analysis_graph().ainvoke(initial_state)
 
     return {
         "expense_id": request.expense_id,
@@ -428,7 +446,7 @@ async def chat(request: ChatRequest):
         "category_prediction": {},
     }
 
-    result = await chat_graph.ainvoke(initial_state)
+    result = await get_chat_graph().ainvoke(initial_state)
 
     last_ai_message = None
     for msg in reversed(result["messages"]):
