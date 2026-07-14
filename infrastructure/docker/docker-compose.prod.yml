@@ -34,6 +34,7 @@ x-common-env: &common-env
   JWT_SECRET: ${JWT_SECRET:?set in env file}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   ENVIRONMENT: production
+  INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?set in env file}
 
 services:
   # ---- Infrastructure ----
@@ -218,6 +219,37 @@ services:
       resources:
         limits:
           memory: 256m
+
+  notification-service:
+    image: ghcr.io/amosbunde/expense-notification-service:${IMAGE_TAG:-latest}
+    environment:
+      <<: *common-env
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  batch-processor:
+    image: ghcr.io/amosbunde/expense-batch-processor:${IMAGE_TAG:-latest}
+    environment:
+      <<: *common-env
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 512m
 
 volumes:
   postgres_data:

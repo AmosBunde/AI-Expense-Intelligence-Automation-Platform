@@ -92,10 +92,16 @@ def _load_auth_users() -> dict[str, dict]:
 # Lifespan & Dependencies
 # =============================================================================
 
+def internal_headers() -> dict[str, str]:
+    """Auth header for calls to internal services (see INTERNAL_API_TOKEN)."""
+    token = os.getenv("INTERNAL_API_TOKEN", "")
+    return {"X-Internal-Token": token} if token else {}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.redis = redis.from_url(settings.redis_url, decode_responses=True)
-    app.state.http_client = httpx.AsyncClient(timeout=30.0)
+    app.state.http_client = httpx.AsyncClient(timeout=30.0, headers=internal_headers())
     # Producer-only Celery app: enqueues by task name so the gateway has no
     # import dependency on the worker codebase. No broker connection is made
     # until the first send_task.
