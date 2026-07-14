@@ -174,7 +174,7 @@ services:
 
   celery-worker:
     image: ghcr.io/amosbunde/expense-api-gateway:${IMAGE_TAG:-latest}
-    command: celery -A packages.queue_client.src.tasks worker --loglevel=info --concurrency=4
+    command: celery -A tasks:celery_app worker --loglevel=info --concurrency=4 -Q expense_processing,batch_processing,reporting,notifications
     environment:
       <<: *common-env
       EXPENSE_PROCESSOR_URL: http://expense-processor:8002
@@ -192,7 +192,7 @@ services:
 
   celery-beat:
     image: ghcr.io/amosbunde/expense-api-gateway:${IMAGE_TAG:-latest}
-    command: celery -A packages.queue_client.src.tasks beat --loglevel=info
+    command: celery -A tasks:celery_app beat --loglevel=info
     environment:
       <<: *common-env
     depends_on:

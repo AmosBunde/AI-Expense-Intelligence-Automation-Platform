@@ -17,6 +17,7 @@ import bcrypt
 import httpx
 import jwt
 import redis.asyncio as redis
+from celery import Celery
 from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -95,6 +96,10 @@ def _load_auth_users() -> dict[str, dict]:
 async def lifespan(app: FastAPI):
     app.state.redis = redis.from_url(settings.redis_url, decode_responses=True)
     app.state.http_client = httpx.AsyncClient(timeout=30.0)
+    # Producer-only Celery app: enqueues by task name so the gateway has no
+    # import dependency on the worker codebase. No broker connection is made
+    # until the first send_task.
+    app.state.celery = Celery(broker=os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/1"))
     yield
     await app.state.redis.close()
     await app.state.http_client.aclose()
@@ -523,13 +528,16 @@ async def trigger_batch(
             detail=f"Batch file exceeds the {settings.max_batch_upload_mb} MB limit",
         )
 
-    # Queue batch job via Celery
-    from packages.queue_client.tasks import process_batch
-    task = process_batch.delay(
-        file_content_b64=base64.b64encode(content).decode(),
-        filename=file.filename,
-        organization_id=user.org,
-        user_id=user.sub,
+    # Enqueue by task name — the queue must match the worker's task_routes
+    task = app.state.celery.send_task(
+        "tasks.process_batch",
+        kwargs={
+            "file_content_b64": base64.b64encode(content).decode(),
+            "filename": file.filename,
+            "organization_id": user.org,
+            "user_id": user.sub,
+        },
+        queue="batch_processing",
     )
     return {"batch_id": task.id, "status": "queued"}
 
