@@ -272,6 +272,20 @@ class PolicyCheckResponse(BaseModel):
     notes: str
 
 
+
+# Decision audit: provided by packages/db-client (on PYTHONPATH in containers).
+# Local test runs without it fall back to log-only records — auditing must
+# never break the decision path either way.
+try:
+    from audit import record_decision
+except ImportError:  # pragma: no cover - container images always have it
+    import logging as _logging
+
+    async def record_decision(**kwargs) -> bool:
+        _logging.getLogger("decision-audit").info("audit-fallback %s", kwargs)
+        return False
+
+
 @app.post("/check", response_model=PolicyCheckResponse)
 async def check_expense(request: PolicyCheckRequest):
     """Evaluate an expense against all active policies."""
@@ -310,6 +324,21 @@ async def check_expense(request: PolicyCheckRequest):
         action = "auto_approve"
     else:
         action = "require_review"
+
+    await record_decision(
+        expense_id=request.expense_id,
+        organization_id=request.organization_id,
+        decision_type="policy_verdict",
+        decision=action,
+        risk_level=(request.fraud_analysis or {}).get("risk_level"),
+        rule_ids=[r.id for r in applicable_rules],
+        details={
+            "violations": violations,
+            "auto_approved": auto_approve and len(violations) == 0,
+            "amount": request.amount,
+            "category": request.category,
+        },
+    )
 
     return PolicyCheckResponse(
         expense_id=request.expense_id,

@@ -392,6 +392,20 @@ async def require_internal_token(request, call_next):
 
 
 
+
+# Decision audit: provided by packages/db-client (on PYTHONPATH in containers).
+# Local test runs without it fall back to log-only records — auditing must
+# never break the decision path either way.
+try:
+    from audit import record_decision
+except ImportError:  # pragma: no cover - container images always have it
+    import logging as _logging
+
+    async def record_decision(**kwargs) -> bool:
+        _logging.getLogger("decision-audit").info("audit-fallback %s", kwargs)
+        return False
+
+
 class AnalyzeRequest(BaseModel):
     expense_id: str
     organization_id: str
@@ -424,6 +438,23 @@ async def analyze_expense(request: AnalyzeRequest):
     }
 
     result = await get_analysis_graph().ainvoke(initial_state)
+
+    fraud = result.get("analysis_result", {}).get("fraud") or {}
+    category = result.get("category_prediction") or {}
+    await record_decision(
+        expense_id=request.expense_id,
+        organization_id=request.organization_id,
+        decision_type="ai_analysis",
+        decision=category.get("category", "uncategorized"),
+        risk_level=fraud.get("risk_level"),
+        fraud_score=fraud.get("risk_score"),
+        model_version=OPENAI_MODEL,
+        details={
+            "fraud_indicators": result.get("fraud_indicators", []),
+            "category_confidence": category.get("confidence"),
+            "had_raw_text": bool(request.raw_text),
+        },
+    )
 
     return {
         "expense_id": request.expense_id,

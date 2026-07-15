@@ -181,6 +181,16 @@ backend is unreachable, so it's explorable standalone.
   plaintext — put TLS at the edge and upgrade to K8s + mTLS (service mesh)
   if your threat model requires encrypted east-west traffic.
 
+**Decision auditability**
+
+- Every AI analysis and policy verdict is written append-only to the
+  `decision_audit` table (what was decided, risk level, fraud score, rule ids,
+  model version) — records survive expense deletion and are never updated.
+- `GET /api/v1/audit/{expense_id}` (manager/admin/finance only) answers
+  "why was this approved/flagged?" with the full decision history.
+- Audit writes never block the decision path: if the store is unreachable the
+  record is emitted as a structured `audit-fallback` log line instead.
+
 **Verification:** the gateway ships 42 tests including a dedicated security
 suite (credential validation, fail-closed behavior, rate limits, header
 presence, upload rejection). CI runs lint → tests → build on every PR.
