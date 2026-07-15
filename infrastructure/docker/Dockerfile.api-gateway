@@ -18,7 +18,8 @@ RUN pip install --no-cache-dir \
     redis[hiredis]==5.2.* \
     pydantic[email]==2.* \
     celery[redis]==5.4.* \
-    bcrypt==4.*
+    bcrypt==4.* \
+    asyncpg==0.30.*
 
 COPY services/api-gateway/ services/api-gateway/
 

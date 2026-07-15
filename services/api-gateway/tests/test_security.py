@@ -195,6 +195,51 @@ class TestUploadLimits:
         assert kwargs["queue"] == "batch_processing"
 
 
+class TestInternalHeaders:
+    def test_header_attached_when_token_set(self, monkeypatch):
+        from src.main import internal_headers
+
+        monkeypatch.setenv("INTERNAL_API_TOKEN", "svc-secret")
+        assert internal_headers() == {"X-Internal-Token": "svc-secret"}
+
+    def test_no_header_when_unset(self, monkeypatch):
+        from src.main import internal_headers
+
+        monkeypatch.delenv("INTERNAL_API_TOKEN", raising=False)
+        assert internal_headers() == {}
+
+
+class TestAuditEndpoint:
+    def _headers(self, role):
+        return {"Authorization": f"Bearer {create_token('u1', 'org-1', role)}"}
+
+    def test_employee_cannot_read_audit(self, client):
+        resp = client.get("/api/v1/audit/exp-1", headers=self._headers("employee"))
+        assert resp.status_code == 403
+
+    def test_finance_reads_audit_records(self, client, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        import src.main as main
+
+        records = [{"decision_type": "policy_verdict", "decision": "auto_approve"}]
+        monkeypatch.setattr(main, "fetch_decisions", AsyncMock(return_value=records))
+        resp = client.get("/api/v1/audit/exp-1", headers=self._headers("finance"))
+        assert resp.status_code == 200
+        assert resp.json() == {"expense_id": "exp-1", "decisions": records}
+
+    def test_unreachable_audit_store_is_503(self, client, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        import src.main as main
+
+        monkeypatch.setattr(main, "fetch_decisions", AsyncMock(side_effect=OSError("down")))
+        resp = client.get("/api/v1/audit/exp-1", headers=self._headers("admin"))
+        assert resp.status_code == 503
+
+
+# NOTE: keep this class LAST — importlib.reload mutates src.main's
+# module dict in place, which breaks endpoint tests that run after it.
 class TestProductionFailFast:
     def test_dev_secret_rejected_in_production(self):
         # Re-import the module with production env + default secret
@@ -213,17 +258,3 @@ class TestProductionFailFast:
             import src.main as main_module
 
             importlib.reload(main_module)
-
-
-class TestInternalHeaders:
-    def test_header_attached_when_token_set(self, monkeypatch):
-        from src.main import internal_headers
-
-        monkeypatch.setenv("INTERNAL_API_TOKEN", "svc-secret")
-        assert internal_headers() == {"X-Internal-Token": "svc-secret"}
-
-    def test_no_header_when_unset(self, monkeypatch):
-        from src.main import internal_headers
-
-        monkeypatch.delenv("INTERNAL_API_TOKEN", raising=False)
-        assert internal_headers() == {}

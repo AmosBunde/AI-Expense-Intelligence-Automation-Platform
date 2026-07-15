@@ -323,3 +323,34 @@ class TestPolicyEngineHealth:
         response = client.get("/health")
         assert response.status_code == 200
         assert response.json()["service"] == "policy-engine"
+
+
+class TestDecisionAudit:
+    """Every /check verdict must produce an audit record."""
+
+    def test_check_records_policy_verdict(self):
+        from unittest.mock import AsyncMock, patch
+
+        from fastapi.testclient import TestClient
+
+        import src.main as main
+
+        with patch.object(main, "record_decision", new=AsyncMock(return_value=True)) as rec:
+            client = TestClient(main.app)
+            resp = client.post(
+                "/check",
+                json={
+                    "expense_id": "exp-audit-1",
+                    "organization_id": "org-1",
+                    "amount": 20.0,
+                    "category": "meals",
+                },
+            )
+        assert resp.status_code == 200
+        rec.assert_awaited_once()
+        kwargs = rec.call_args.kwargs
+        assert kwargs["decision_type"] == "policy_verdict"
+        assert kwargs["expense_id"] == "exp-audit-1"
+        assert kwargs["decision"] == resp.json()["recommended_action"]
+        assert isinstance(kwargs["rule_ids"], list) and kwargs["rule_ids"]
+        assert kwargs["details"]["auto_approved"] == resp.json()["auto_approved"]

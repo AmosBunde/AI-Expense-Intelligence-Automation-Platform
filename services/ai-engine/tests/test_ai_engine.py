@@ -193,3 +193,40 @@ class TestAIEngineHealth:
     def test_anomalies_endpoint(self, client):
         response = client.get("/anomalies?organization_id=org-123")
         assert response.status_code == 200
+
+
+class TestDecisionAudit:
+    """Every /analyze run must produce an audit record."""
+
+    @pytest.mark.asyncio
+    async def test_analyze_records_ai_decision(self, client):
+        from unittest.mock import AsyncMock, patch
+
+        import src.main as main_mod
+
+        fake_graph = MagicMock()
+        fake_graph.ainvoke = AsyncMock(
+            return_value={
+                "analysis_result": {
+                    "extraction": {"merchant_name": "Uber"},
+                    "fraud": {"risk_level": "low", "risk_score": 0.1},
+                },
+                "category_prediction": {"category": "travel", "confidence": 0.9},
+                "fraud_indicators": [],
+            }
+        )
+        with (
+            patch.object(main_mod, "get_analysis_graph", return_value=fake_graph),
+            patch.object(main_mod, "record_decision", new=AsyncMock(return_value=True)) as rec,
+        ):
+            resp = client.post(
+                "/analyze",
+                json={"expense_id": "exp-a1", "organization_id": "org-1", "raw_text": "UBER $12"},
+            )
+        assert resp.status_code == 200
+        rec.assert_awaited_once()
+        kwargs = rec.call_args.kwargs
+        assert kwargs["decision_type"] == "ai_analysis"
+        assert kwargs["decision"] == "travel"
+        assert kwargs["risk_level"] == "low"
+        assert kwargs["fraud_score"] == 0.1

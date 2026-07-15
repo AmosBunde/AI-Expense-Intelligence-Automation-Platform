@@ -549,6 +549,34 @@ async def trigger_batch(
 
 
 # =============================================================================
+# Routes: Decision Audit
+# =============================================================================
+
+# Provided by packages/db-client (on PYTHONPATH in containers); local test
+# runs patch or skip this.
+try:
+    from audit import fetch_decisions
+except ImportError:  # pragma: no cover - container images always have it
+    fetch_decisions = None
+
+AUDIT_ROLES = ("manager", "admin", "finance")
+
+
+@app.get("/api/v1/audit/{expense_id}", tags=["audit"])
+async def get_decision_audit(expense_id: str, user: TokenPayload = Depends(rate_limit)):
+    """Why was this expense approved/flagged? Append-only decision records."""
+    if user.role not in AUDIT_ROLES:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if fetch_decisions is None:
+        raise HTTPException(status_code=503, detail="Audit store not available")
+    try:
+        records = await fetch_decisions(expense_id, user.org)
+    except Exception:
+        raise HTTPException(status_code=503, detail="Audit store not reachable")
+    return {"expense_id": expense_id, "decisions": records}
+
+
+# =============================================================================
 # Health Check
 # =============================================================================
 
